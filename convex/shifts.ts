@@ -1,0 +1,418 @@
+import { ConvexError, v } from "convex/values";
+import { mutation, query } from "./_generated/server";
+import { Doc, Id } from "./_generated/dataModel";
+import schema from "./schema";
+import {
+  applyClaim,
+  applyRelease,
+  logActivity,
+  lowestFreePosition,
+  readSpotClaims,
+  readWaitlist,
+  requireVolunteer,
+  touchShift,
+} from "./lib";
+
+/** Hard ceiling on a single +N tap, and on what a shift can ever grow to. */
+const MAX_DELTA = 4;
+const MAX_CAPACITY = 24;
+
+/** Last N history rows shown inside the sheet. */
+const DETAIL_ACTIVITY_LIMIT = 12;
+
+const rosterEntry = v.object({
+  position: v.number(),
+  handle: v.string(),
+  glyph: v.string(),
+  colorIndex: v.number(),
+  isYou: v.boolean(),
+  isSeed: v.boolean(),
+});
+
+type RosterEntry = {
+  position: number;
+  handle: string;
+  glyph: string;
+  colorIndex: number;
+  isYou: boolean;
+  isSeed: boolean;
+};
+
+const waitlistEntry = v.object({
+  claimId: v.id("claims"),
+  rank: v.number(),
+  position: v.number(),
+  handle: v.string(),
+  glyph: v.string(),
+  colorIndex: v.number(),
+  isYou: v.boolean(),
+  isSeed: v.boolean(),
+});
+
+type WaitlistEntry = {
+  claimId: Id<"claims">;
+  rank: number;
+  position: number;
+  handle: string;
+  glyph: string;
+  colorIndex: number;
+  isYou: boolean;
+  isSeed: boolean;
+};
+
+const yourClaimValidator = v.object({
+  claimId: v.id("claims"),
+  kind: v.union(v.literal("spot"), v.literal("waitlist")),
+  position: v.number(),
+  waitlistRank: v.union(v.number(), v.null()),
+});
+
+type YourClaim = {
+  claimId: Id<"claims">;
+  kind: "spot" | "waitlist";
+  position: number;
+  waitlistRank: number | null;
+};
+
+/** A shift that vanished mid-navigation must paint an empty sheet, never throw. */
+const emptyDetail = {
+  shift: null,
+  project: null,
+  roster: [] as RosterEntry[],
+  openPositions: [] as number[],
+  waitlist: [] as WaitlistEntry[],
+  yourClaim: null,
+  activity: [] as Doc<"activity">[],
+};
+
+/**
+ * Everything the shift sheet renders, in one subscription.
+ *
+ * DELIBERATELY EXCLUDES watcher presence. Presence rows are rewritten by a 15s heartbeat from
+ * every open window; if this query read them, every heartbeat anywhere would invalidate the
+ * sheet and re-render the roster, the spot grid, and whatever button the keyboard user is
+ * standing on. "N watching" is a separate, cheap subscription (presence.onScope) precisely so
+ * that churn cannot reach this read set.
+ *
+ * Returns raw timestamps only — no boolean here is derived from Date.now(), because a Convex
+ * query does not re-run just because wall-clock time passed. The client ticks its own clock.
+ *
+ * Never throws: an unknown deviceKey is a first-paint race with volunteers.ensure (isYou is
+ * simply false everywhere and yourClaim is null), and a missing shift returns the safe empty
+ * shape.
+ */
+export const detail = query({
+  args: { shiftId: v.id("shifts"), deviceKey: v.string() },
+  returns: v.object({
+    shift: v.union(schema.doc("shifts"), v.null()),
+    project: v.union(schema.doc("projects"), v.null()),
+    roster: v.array(rosterEntry),
+    openPositions: v.array(v.number()),
+    waitlist: v.array(waitlistEntry),
+    yourClaim: v.union(yourClaimValidator, v.null()),
+    activity: v.array(schema.doc("activity")),
+  }),
+  handler: async (ctx, args) => {
+    const shift = await ctx.db.get(args.shiftId);
+    if (!shift) return emptyDetail;
+
+    const project = await ctx.db.get(shift.projectId);
+
+    // An unknown device is a race with volunteers.ensure, not an error.
+    const volunteer = await ctx.db
+      .query("volunteers")
+      .withIndex("by_device_key", (q) => q.eq("deviceKey", args.deviceKey))
+      .unique();
+    const youId: Id<"volunteers"> | null = volunteer?._id ?? null;
+
+    // Same index and same ordering as lib.readSpotClaims / lib.readWaitlist; inlined here
+    // because those helpers are typed for MutationCtx.
+    const spots = await ctx.db
+      .query("claims")
+      .withIndex("by_shift_kind_position", (q) => q.eq("shiftId", args.shiftId).eq("kind", "spot"))
+      .collect();
+    const waitlistRows = await ctx.db
+      .query("claims")
+      .withIndex("by_shift_kind_position", (q) =>
+        q.eq("shiftId", args.shiftId).eq("kind", "waitlist"),
+      )
+      .collect();
+
+    // <= capacity (16) gets, and only while the sheet is actually open.
+    const roster: RosterEntry[] = [];
+    for (const claim of spots) {
+      const holder = await ctx.db.get(claim.volunteerId);
+      roster.push({
+        position: claim.position,
+        handle: holder?.handle ?? "A neighbor",
+        glyph: holder?.glyph ?? "??",
+        colorIndex: holder?.colorIndex ?? 0,
+        isYou: youId !== null && claim.volunteerId === youId,
+        isSeed: claim.isSeed,
+      });
+    }
+    roster.sort((a, b) => a.position - b.position);
+
+    const takenSet = new Set(spots.map((c) => c.position));
+    const openPositions: number[] = [];
+    for (let i = 0; i < shift.capacity; i++) {
+      if (!takenSet.has(i)) openPositions.push(i);
+    }
+
+    // Ascending position is FIFO, so the array index is the rank.
+    const waitlist: WaitlistEntry[] = [];
+    for (let i = 0; i < waitlistRows.length; i++) {
+      const claim = waitlistRows[i];
+      const holder = await ctx.db.get(claim.volunteerId);
+      waitlist.push({
+        claimId: claim._id,
+        rank: i + 1,
+        position: claim.position,
+        handle: holder?.handle ?? "A neighbor",
+        glyph: holder?.glyph ?? "??",
+        colorIndex: holder?.colorIndex ?? 0,
+        isYou: youId !== null && claim.volunteerId === youId,
+        isSeed: claim.isSeed,
+      });
+    }
+
+    let yourClaim: YourClaim | null = null;
+    if (youId !== null) {
+      const mine =
+        spots.find((c) => c.volunteerId === youId) ??
+        waitlistRows.find((c) => c.volunteerId === youId) ??
+        null;
+      if (mine) {
+        yourClaim = {
+          claimId: mine._id,
+          kind: mine.kind,
+          position: mine.position,
+          waitlistRank:
+            mine.kind === "waitlist"
+              ? waitlistRows.filter((c) => c.position <= mine.position).length
+              : null,
+        };
+      }
+    }
+
+    const activity = await ctx.db
+      .query("activity")
+      .withIndex("by_shift_created", (q) => q.eq("shiftId", args.shiftId))
+      .order("desc")
+      .take(DETAIL_ACTIVITY_LIMIT);
+
+    return { shift, project, roster, openPositions, waitlist, yourClaim, activity };
+  },
+});
+
+const alternativeValidator = v.object({
+  shiftId: v.id("shifts"),
+  title: v.string(),
+  startsAt: v.number(),
+  spotsLeft: v.number(),
+});
+
+/**
+ * Every non-error outcome is a RETURN VALUE, so the UI renders designed copy instead of an
+ * error toast: already claimed, a time conflict, a waitlist seat with an alternative offer,
+ * and a reseat when your preferred spot was taken a moment before you clicked.
+ */
+const claimResultValidator = v.union(
+  v.object({
+    outcome: v.literal("already"),
+    kind: v.union(v.literal("spot"), v.literal("waitlist")),
+    position: v.number(),
+  }),
+  v.object({
+    outcome: v.literal("conflict"),
+    conflictShiftId: v.id("shifts"),
+    conflictTitle: v.string(),
+    conflictStartsAt: v.number(),
+  }),
+  v.object({
+    outcome: v.literal("waitlisted"),
+    rank: v.number(),
+    alternative: v.union(alternativeValidator, v.null()),
+    lastActorName: v.string(),
+  }),
+  v.object({
+    outcome: v.union(v.literal("claimed"), v.literal("reseated")),
+    position: v.number(),
+    requestedPosition: v.union(v.number(), v.null()),
+    nth: v.number(),
+    spotsLeft: v.number(),
+  }),
+);
+
+/**
+ * Take a spot, or a waitlist seat when the shift is full.
+ *
+ * A thin wrapper on purpose: identity is resolved server-side from the device key — no mutation
+ * ever accepts a client-supplied volunteerId — and then the single write engine in
+ * lib.applyClaim runs. The community pulse calls that exact same engine, so simulated activity
+ * travels the identical code path, the same transaction, the same activity rows, the same
+ * reactivity. The race guard, the idempotency check, the overlap check and the alternative
+ * offer all live there and are deliberately not duplicated here.
+ */
+export const claim = mutation({
+  args: {
+    deviceKey: v.string(),
+    shiftId: v.id("shifts"),
+    preferredPosition: v.optional(v.number()),
+  },
+  returns: claimResultValidator,
+  handler: async (ctx, args) => {
+    const volunteer = await requireVolunteer(ctx, args.deviceKey);
+    return await applyClaim(ctx, {
+      volunteerId: volunteer._id,
+      handle: volunteer.handle,
+      shiftId: args.shiftId,
+      preferredPosition: args.preferredPosition,
+      isSim: false,
+    });
+  },
+});
+
+const releaseResultValidator = v.union(
+  v.object({ outcome: v.literal("left_waitlist") }),
+  v.object({
+    outcome: v.literal("released"),
+    promoted: v.union(v.object({ handle: v.string() }), v.null()),
+  }),
+);
+
+/**
+ * Give up your spot, or leave the waitlist.
+ *
+ * Ownership is checked inside lib.applyRelease through the server-resolved volunteerId, never a
+ * client-supplied one. When a spot is freed, the FIFO head of the waitlist is promoted into the
+ * exact vacated position in the same transaction — which is why a release in one window is
+ * visibly a promotion in every other window, with no extra machinery.
+ */
+export const release = mutation({
+  args: { deviceKey: v.string(), shiftId: v.id("shifts") },
+  returns: releaseResultValidator,
+  handler: async (ctx, args) => {
+    const volunteer = await requireVolunteer(ctx, args.deviceKey);
+    return await applyRelease(ctx, {
+      volunteerId: volunteer._id,
+      handle: volunteer.handle,
+      shiftId: args.shiftId,
+      isSim: false,
+    });
+  },
+});
+
+/**
+ * Open more spots on a shift, promoting waitlisted neighbors into them immediately — the
+ * fastest way for a judge to manufacture a live promotion in two windows at once.
+ *
+ * Capacity growth and the promotions happen in ONE transaction. Every promoted seat is chosen
+ * with lowestFreePosition against a takenSet that grows as we go, so two promotions can never
+ * land on the same position, and positions reuse holes left by earlier releases before spilling
+ * into the newly added range. Both counters are recomputed from the contention index afterwards
+ * rather than adjusted by arithmetic, so they cannot drift.
+ */
+export const addCapacity = mutation({
+  args: { deviceKey: v.string(), shiftId: v.id("shifts"), delta: v.number() },
+  returns: v.object({ promotedHandles: v.array(v.string()), capacity: v.number() }),
+  handler: async (ctx, args) => {
+    const volunteer = await requireVolunteer(ctx, args.deviceKey);
+    const { delta } = args;
+
+    // Number.isInteger also rejects NaN, Infinity and fractions, so nothing unbounded or
+    // non-finite can ever reach the capacity field.
+    if (!Number.isInteger(delta) || delta < 1 || delta > MAX_DELTA) {
+      throw new ConvexError({
+        code: "BAD_INPUT",
+        message: `Add between 1 and ${MAX_DELTA} spots at a time.`,
+      });
+    }
+
+    const shift = await ctx.db.get(args.shiftId);
+    if (!shift) {
+      throw new ConvexError({ code: "GONE", message: "That shift is no longer available." });
+    }
+    if (shift.status === "cancelled") {
+      throw new ConvexError({ code: "CANCELLED", message: "That shift was cancelled." });
+    }
+    if (shift.capacity + delta > MAX_CAPACITY) {
+      throw new ConvexError({
+        code: "BAD_INPUT",
+        message: `A shift can hold at most ${MAX_CAPACITY} people.`,
+      });
+    }
+
+    const newCapacity = shift.capacity + delta;
+    const now = Date.now();
+
+    // The same race guard as applyClaim: collecting every spot row of this shift puts them all
+    // in the read set, so a concurrent claim invalidates us and Convex retries against fresh
+    // state instead of letting two writers both believe a position is free.
+    const taken = await readSpotClaims(ctx, args.shiftId);
+    const takenSet = new Set(taken.map((c) => c.position));
+    const wl = await readWaitlist(ctx, args.shiftId);
+
+    const promoteCount = Math.min(delta, wl.length);
+    const promotedHandles: string[] = [];
+
+    for (let i = 0; i < promoteCount; i++) {
+      const head = wl[i];
+      const position = lowestFreePosition(takenSet, newCapacity);
+      if (position === null) break;
+
+      const headVol = await ctx.db.get(head.volunteerId);
+      const promotedName = headVol?.handle ?? "A neighbor";
+
+      await ctx.db.delete(head._id);
+      await ctx.db.insert("claims", {
+        shiftId: args.shiftId,
+        projectId: shift.projectId,
+        volunteerId: head.volunteerId,
+        kind: "spot",
+        position,
+        startsAt: shift.startsAt,
+        endsAt: shift.endsAt,
+        isSeed: head.isSeed,
+        createdAt: now,
+      });
+      takenSet.add(position);
+      promotedHandles.push(promotedName);
+
+      await logActivity(ctx, {
+        kind: "promoted",
+        projectId: shift.projectId,
+        shiftId: args.shiftId,
+        volunteerId: head.volunteerId,
+        actorName: promotedName,
+        message: `${promotedName} moved off the waitlist into ${shift.title}`,
+        isSim: false,
+      });
+    }
+
+    const spotsAfter = await readSpotClaims(ctx, args.shiftId);
+    const waitlistAfter = await readWaitlist(ctx, args.shiftId);
+
+    await touchShift(ctx, shift, {
+      kind: "capacity_added",
+      actorName: volunteer.handle,
+      isSim: false,
+      patch: {
+        capacity: newCapacity,
+        filledCount: spotsAfter.length,
+        waitlistCount: waitlistAfter.length,
+      },
+    });
+    await logActivity(ctx, {
+      kind: "capacity_added",
+      projectId: shift.projectId,
+      shiftId: args.shiftId,
+      volunteerId: volunteer._id,
+      actorName: volunteer.handle,
+      message: `${volunteer.handle} opened ${delta} more spots at ${shift.title}`,
+      isSim: false,
+    });
+
+    return { promotedHandles, capacity: newCapacity };
+  },
+});

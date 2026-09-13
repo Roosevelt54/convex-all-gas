@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+
+    <title>Crewcall — live board for neighborhood shifts</title>
+    <meta
+      name="description"
+      content="Claim a volunteer spot on a neighborhood project and watch the board update live. No login, no setup."
+    />
+
+    <!--
+      Two theme-color values so the mobile browser chrome matches the painted page in
+      both schemes. These mirror --bg in src/styles.css: light #F1F4F8, dark #0A0E13.
+    -->
+    <meta id="theme-color" name="theme-color" content="#0A0E13" />
+    <meta name="color-scheme" content="dark light" />
+
+    <!-- Inline SVG favicon: no network request, works offline, scales in both themes. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2317439B'/%3E%3Ccircle cx='10' cy='16' r='3.5' fill='%23fff'/%3E%3Ccircle cx='20' cy='16' r='3.5' fill='none' stroke='%23fff' stroke-width='2'/%3E%3C/svg%3E"
+    />
+
+    <!--
+      Same-origin stylesheet, bundled by Vite. Nothing external is fetched anywhere in this
+      document: no font CDN, no analytics, no preconnect. The whole app paints offline.
+      src/main.tsx does NOT need to import this file.
+    -->
+    <link rel="stylesheet" href="/src/styles.css" />
+
+    <script>
+      // Applies a stored theme choice before first paint so an explicit light/dark
+      // override never flashes the opposite scheme. Reads one localStorage key and
+      // sets one attribute — no network, no layout, no measurable paint delay.
+      (function () {
+        // Dark is the default; light applies only when the user explicitly chose it.
+        var t = "dark";
+        try {
+          if (localStorage.getItem("crewcall.theme") === "light") t = "light";
+        } catch (e) {
+          /* private mode / storage disabled: keep the dark default */
+        }
+        document.documentElement.setAttribute("data-theme", t);
+        var meta = document.getElementById("theme-color");
+        if (meta) meta.setAttribute("content", t === "light" ? "#F1F4F8" : "#0A0E13");
+      })();
+    </script>
+  </head>
+
+  <body>
+    <div id="root"></div>
+
+    <noscript>
+      <div class="noscript-note">
+        <h1>Crewcall needs JavaScript</h1>
+        <p>
+          The shift board is a live view — counters, rosters and the activity feed update
+          through an open subscription. Enable JavaScript to see it.
+        </p>
+      </div>
+    </noscript>
+
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

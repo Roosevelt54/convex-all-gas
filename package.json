@@ -1,0 +1,30 @@
+{
+  "name": "crewcall",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "run-p dev:frontend dev:backend",
+    "dev:frontend": "vite",
+    "dev:backend": "convex dev",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "seed": "convex run seed:ensure",
+    "test:race": "node tests/race.mjs .env.local",
+    "deploy": "npx @convex-dev/static-hosting deploy"
+  },
+  "dependencies": {
+    "@convex-dev/static-hosting": "^0.2.1",
+    "convex": "^1.45.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0"
+  }
+}
