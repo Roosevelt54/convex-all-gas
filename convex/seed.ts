@@ -9,7 +9,7 @@ import type { ActivityKind, ChangeKind } from "./lib";
  * Bump this to force a reseed on the next ensure(). Idempotence is keyed on it, so an
  * unchanged version plus at least one shift means ensure() is a no-op.
  */
-const SEED_VERSION = 4;
+const SEED_VERSION = 5;
 
 const HOUR = 3_600_000;
 const DAY = 86_400_000;

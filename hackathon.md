@@ -3,16 +3,16 @@
 - **Project:** Crewcall
 - **Event:** Convex All Gas Hackathon
 - **What it does:** A real-time volunteer shift board where neighbors claim spots on community projects, join a FIFO waitlist when a shift is full, and get promoted automatically when someone releases.
-- **Live app:** not deployed
+- **Live app:** https://quaint-ermine-433.convex.site
 - **Repo:** https://github.com/Roosevelt54/convex-all-gas
 - **Frontend:** Convex static hosting
-- **Convex deployment:** not deployed
+- **Convex deployment:** https://quaint-ermine-433.convex.cloud
 - **Components:** @convex-dev/static-hosting
 - **Convex features:** schema, indexes, queries, mutations, scheduled functions, crons, realtime queries, paginated queries, optimistic updates
 - **Auth:** none
 - **AI models:** none
 - **Started:** 2026-09-11T22:41:07Z
-- **Last updated:** 2026-09-13T11:38:16Z
+- **Last updated:** 2026-09-17T18:12:47Z
 
 ## Log
 
@@ -24,7 +24,7 @@ Convex configuration exists yet, so every product field above is recorded as
 absent rather than assumed. Frontend host chosen as Convex static hosting; the
 component is not installed yet because there is no Convex app to attach it to.
 
-### 2026-09-13 - working tree
+### 2026-09-13 - 81f9b35
 Built Crewcall: a live shift board, a focus-trapped shift sheet, and a read-only wall
 display. Claiming a spot re-reads every spot claim for the shift inside one transaction, so
 concurrent claims cannot double-book; a local test fires 8 simultaneous claims at the last
@@ -37,3 +37,12 @@ deployment only; nothing is deployed. Convex features: schema, indexes, queries,
 scheduled functions, crons, realtime queries, paginated queries, optimistic updates
 (`convex/schema.ts`, `convex/lib.ts`, `convex/shifts.ts`, `convex/sim.ts`, `convex/crons.ts`,
 `src/components/Board.tsx`, `src/components/ShiftSheet.tsx`, `tests/race.mjs`).
+
+### 2026-09-17 - working tree
+Moved from the anonymous local backend to a Convex cloud project and published the site with
+Convex static hosting, which now owns the site root while app HTTP routes sit under `/api`
+(`convex/convex.config.ts`). The live app loads with seeded data, the community pulse changes
+counters with no input, and a claim in one window moved the wall display's spots-left count in a
+second window without a reload. The race test passes against the cloud backend: 8 concurrent
+claims at the last spot, 1 winner, 7 waitlisted. Bumped the seed version so the deployment
+reseeds cleanly without test leftovers (`convex/seed.ts`).
