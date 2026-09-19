@@ -1,53 +1,72 @@
 import { useEffect, useRef } from "react";
 
 /**
- * The dark globe behind the hero.
+ * The Crewcall mark as a genuinely 3D object: a thick extruded "C" that turns a full 360 on its
+ * vertical axis, so you see the front face, then the depth of its side wall, then the back.
  *
- * A black sphere with a dotted surface, a latitude/longitude wireframe and a lit rim, drawn with a
- * real perspective projection on a 2D canvas — no 3D library, nothing to download. It spins slowly
- * on its own and leans toward the pointer, easing into the new angle rather than snapping.
- *
- * Only the front hemisphere is drawn (points whose rotated z faces the camera), which is what makes
- * it read as a solid body instead of a cloud of dots.
+ * Built by hand — the ring is extruded into quads, each quad is lit by its own normal, and the
+ * quads are painted back-to-front. No 3D library, nothing extra to download.
  */
-type P = { x: number; y: number; z: number };
+type V = { x: number; y: number; z: number };
+type Quad = { v: [V, V, V, V]; n: V; tone: number };
 
-/** Evenly spread surface points — Fibonacci, so nothing clusters at the poles. */
-function surface(count: number): P[] {
-  const pts: P[] = [];
-  const golden = Math.PI * (3 - Math.sqrt(5));
-  for (let i = 0; i < count; i++) {
-    const y = 1 - (i / (count - 1)) * 2;
-    const r = Math.sqrt(Math.max(0, 1 - y * y));
-    const theta = golden * i;
-    pts.push({ x: Math.cos(theta) * r, y, z: Math.sin(theta) * r });
-  }
-  return pts;
-}
+const GAP_START = -0.62; // radians: where the C opens
+const GAP_END = 0.62;
+const R_OUT = 1;
+const R_IN = 0.56;
+const DEPTH = 0.46; // the "good thickness" — front face to back face
+const SEGMENTS = 64;
 
-/** Meridians and parallels, as point paths so they can be depth-culled per point. */
-function wireframe(): P[][] {
-  const lines: P[][] = [];
-  const STEPS = 90;
-  for (let m = 0; m < 12; m++) {
-    const lon = (m / 12) * Math.PI * 2;
-    const line: P[] = [];
-    for (let i = 0; i <= STEPS; i++) {
-      const lat = -Math.PI / 2 + (i / STEPS) * Math.PI;
-      line.push({ x: Math.cos(lat) * Math.cos(lon), y: Math.sin(lat), z: Math.cos(lat) * Math.sin(lon) });
-    }
-    lines.push(line);
+/** Build the extruded ring once: front face, back face, outer and inner walls, and the two caps. */
+function buildMark(): Quad[] {
+  const quads: Quad[] = [];
+  const zF = -DEPTH / 2;
+  const zB = DEPTH / 2;
+  const span = Math.PI * 2 - (GAP_END - GAP_START);
+  const at = (i: number) => GAP_END + (i / SEGMENTS) * span;
+  const p = (ang: number, r: number, z: number): V => ({ x: Math.cos(ang) * r, y: Math.sin(ang) * r, z });
+
+  for (let i = 0; i < SEGMENTS; i++) {
+    const a0 = at(i);
+    const a1 = at(i + 1);
+    const mid = (a0 + a1) / 2;
+
+    // Front and back faces. Their normals point straight out along z.
+    quads.push({
+      v: [p(a0, R_IN, zF), p(a0, R_OUT, zF), p(a1, R_OUT, zF), p(a1, R_IN, zF)],
+      n: { x: 0, y: 0, z: -1 },
+      tone: 1,
+    });
+    quads.push({
+      v: [p(a0, R_IN, zB), p(a1, R_IN, zB), p(a1, R_OUT, zB), p(a0, R_OUT, zB)],
+      n: { x: 0, y: 0, z: 1 },
+      tone: 0.82,
+    });
+    // Outer wall — this is the band you see as the mark turns edge-on.
+    quads.push({
+      v: [p(a0, R_OUT, zF), p(a0, R_OUT, zB), p(a1, R_OUT, zB), p(a1, R_OUT, zF)],
+      n: { x: Math.cos(mid), y: Math.sin(mid), z: 0 },
+      tone: 0.94,
+    });
+    // Inner wall, normal pointing back at the hole's centre.
+    quads.push({
+      v: [p(a0, R_IN, zF), p(a1, R_IN, zF), p(a1, R_IN, zB), p(a0, R_IN, zB)],
+      n: { x: -Math.cos(mid), y: -Math.sin(mid), z: 0 },
+      tone: 0.66,
+    });
   }
-  for (let p = 1; p < 7; p++) {
-    const lat = -Math.PI / 2 + (p / 7) * Math.PI;
-    const line: P[] = [];
-    for (let i = 0; i <= STEPS; i++) {
-      const lon = (i / STEPS) * Math.PI * 2;
-      line.push({ x: Math.cos(lat) * Math.cos(lon), y: Math.sin(lat), z: Math.cos(lat) * Math.sin(lon) });
-    }
-    lines.push(line);
+
+  // The two flat ends of the C.
+  for (const [ang, sign] of [
+    [GAP_END, 1],
+    [GAP_START, -1],
+  ] as const) {
+    const n = { x: -Math.sin(ang) * sign, y: Math.cos(ang) * sign, z: 0 };
+    const face: [V, V, V, V] = [p(ang, R_IN, zF), p(ang, R_OUT, zF), p(ang, R_OUT, zB), p(ang, R_IN, zB)];
+    quads.push({ v: sign === 1 ? face : ([...face].reverse() as [V, V, V, V]), n, tone: 0.75 });
   }
-  return lines;
+
+  return quads;
 }
 
 export default function LandingBackdrop() {
@@ -59,24 +78,12 @@ export default function LandingBackdrop() {
     if (!canvas || !ctx) return;
 
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const points = surface(1300);
-    const lines = wireframe();
-    // Bright "spots being claimed" that ride the surface.
-    const sparks = Array.from({ length: 6 }, (_, i) => ({
-      lon: (i / 6) * Math.PI * 2,
-      lat: -0.7 + (i % 4) * 0.42,
-      speed: 0.16 + (i % 3) * 0.06,
-    }));
+    const quads = buildMark();
+    const light = { x: -0.45, y: -0.62, z: -0.65 };
 
     let raf = 0;
     let w = 0;
     let h = 0;
-    // Where the pointer wants the globe, and where it currently is. The gap is eased every frame.
-    let targetYaw = 0;
-    let targetPitch = -0.12;
-    let yaw = 0;
-    let pitch = -0.12;
-    let last = 0;
 
     const resize = () => {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -89,121 +96,62 @@ export default function LandingBackdrop() {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
 
-    const onPointer = (e: PointerEvent) => {
-      // -1..1 across the viewport, then a gentle lean: never a full spin, so it stays calm.
-      const nx = (e.clientX / window.innerWidth) * 2 - 1;
-      const ny = (e.clientY / window.innerHeight) * 2 - 1;
-      targetYaw = nx * 0.75;
-      targetPitch = -0.12 + ny * 0.45;
-    };
-
     const frame = (t: number) => {
-      const dt = last === 0 ? 16 : Math.min(64, t - last);
-      last = t;
-
-      // Constant slow spin, plus the pointer's lean eased in at ~4%/frame.
-      const spin = reduced.matches ? 0.6 : t / 14000;
-      yaw += (targetYaw - yaw) * (1 - Math.pow(0.94, dt / 16));
-      pitch += (targetPitch - pitch) * (1 - Math.pow(0.94, dt / 16));
-
-      const a = spin + yaw;
-      const b = pitch;
-      const cosA = Math.cos(a);
-      const sinA = Math.sin(a);
-      const cosB = Math.cos(b);
-      const sinB = Math.sin(b);
-      const R = Math.min(w, h) * 0.34;
+      // A full turn roughly every 11 seconds: readable, never frantic.
+      const spin = reduced.matches ? 0.9 : (t / 11000) * Math.PI * 2;
+      const tilt = -0.22; // a slight lean so the top face catches the light
+      const cosA = Math.cos(spin);
+      const sinA = Math.sin(spin);
+      const cosB = Math.cos(tilt);
+      const sinB = Math.sin(tilt);
+      const R = Math.min(w, h) * 0.22;
       const cx = w / 2;
       const cy = h * 0.5;
 
       ctx.clearRect(0, 0, w, h);
 
-      const project = (p: P) => {
-        const x1 = p.x * cosA - p.z * sinA;
-        const z1 = p.x * sinA + p.z * cosA;
-        const y1 = p.y * cosB - z1 * sinB;
-        const z2 = p.y * sinB + z1 * cosB;
-        const scale = 2.8 / (2.8 + z2);
-        return { sx: cx + x1 * R * scale, sy: cy + y1 * R * scale, z: z2, scale };
+      const rotate = (v: V): V => {
+        const x1 = v.x * cosA - v.z * sinA; // yaw: the 360 spin
+        const z1 = v.x * sinA + v.z * cosA;
+        const y1 = v.y * cosB - z1 * sinB; // pitch: the fixed lean
+        const z2 = v.y * sinB + z1 * cosB;
+        return { x: x1, y: y1, z: z2 };
+      };
+      const project = (v: V) => {
+        const scale = 3.4 / (3.4 + v.z);
+        return { sx: cx + v.x * R * scale, sy: cy + v.y * R * scale };
       };
 
-      // The body: a black sphere, lit from the upper left so it reads as a ball, not a disc.
-      const body = ctx.createRadialGradient(cx - R * 0.35, cy - R * 0.4, R * 0.1, cx, cy, R * 1.02);
-      body.addColorStop(0, "#1d1f24");
-      body.addColorStop(0.55, "#101114");
-      body.addColorStop(1, "#050506");
-      ctx.fillStyle = body;
-      ctx.beginPath();
-      ctx.arc(cx, cy, R, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Atmosphere: a soft lit rim just outside the edge.
-      const rim = ctx.createRadialGradient(cx, cy, R * 0.92, cx, cy, R * 1.22);
-      rim.addColorStop(0, "rgba(150,180,255,0.20)");
-      rim.addColorStop(0.5, "rgba(130,165,255,0.07)");
-      rim.addColorStop(1, "rgba(130,165,255,0)");
-      ctx.fillStyle = rim;
-      ctx.beginPath();
-      ctx.arc(cx, cy, R * 1.22, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Surface stipple. Front hemisphere only; alpha falls off toward the limb.
-      ctx.fillStyle = "#cfd8ea";
-      for (const p of points) {
-        const { sx, sy, z, scale } = project(p);
-        if (z > 0.02) continue;
-        const facing = Math.min(1, -z);
-        ctx.globalAlpha = 0.06 + facing * 0.5;
-        ctx.beginPath();
-        ctx.arc(sx, sy, Math.max(0.35, scale * 1.15), 0, Math.PI * 2);
-        ctx.fill();
+      // Transform, drop the faces pointing away, then paint far ones first.
+      const drawable = [];
+      for (const q of quads) {
+        const n = rotate(q.n);
+        if (n.z > 0.02) continue; // back-facing
+        const v = q.v.map(rotate) as [V, V, V, V];
+        const depth = (v[0].z + v[1].z + v[2].z + v[3].z) / 4;
+        const lam = Math.max(0, -(n.x * light.x + n.y * light.y + n.z * light.z));
+        drawable.push({ v, depth, shade: q.tone * (0.28 + lam * 0.85) });
       }
+      drawable.sort((a, b) => b.depth - a.depth);
 
-      // Wireframe, drawn as short segments so it can be culled point by point.
-      ctx.lineWidth = 1;
-      for (const line of lines) {
-        let drawing = false;
+      for (const f of drawable) {
+        const pts = f.v.map(project);
+        const level = Math.min(1, f.shade);
+        // The mark's own blue, lit: dark in shadow, near-white on the face that faces the light.
+        const r = Math.round(30 + level * 130);
+        const g = Math.round(52 + level * 140);
+        const b = Math.round(96 + level * 150);
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
         ctx.beginPath();
-        for (const p of line) {
-          const { sx, sy, z } = project(p);
-          if (z > 0) {
-            drawing = false;
-            continue;
-          }
-          if (!drawing) {
-            ctx.moveTo(sx, sy);
-            drawing = true;
-          } else {
-            ctx.lineTo(sx, sy);
-          }
-        }
-        ctx.globalAlpha = 0.16;
-        ctx.strokeStyle = "#9fb6e8";
+        ctx.moveTo(pts[0].sx, pts[0].sy);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].sx, pts[i].sy);
+        ctx.closePath();
+        ctx.fill();
+        // Hairline of the same colour closes the seams between adjacent quads.
+        ctx.strokeStyle = ctx.fillStyle;
+        ctx.lineWidth = 1;
         ctx.stroke();
       }
-
-      // The bright ones.
-      for (const s of sparks) {
-        const lon = reduced.matches ? s.lon : s.lon + (t / 1000) * s.speed;
-        const p = {
-          x: Math.cos(s.lat) * Math.cos(lon),
-          y: Math.sin(s.lat),
-          z: Math.cos(s.lat) * Math.sin(lon),
-        };
-        const { sx, sy, z, scale } = project(p);
-        if (z > 0) continue;
-        const facing = Math.min(1, -z);
-        ctx.globalAlpha = 0.3 + facing * 0.7;
-        const glow = ctx.createRadialGradient(sx, sy, 0, sx, sy, 22 * scale);
-        glow.addColorStop(0, "rgba(255,255,255,0.95)");
-        glow.addColorStop(0.3, "rgba(160,195,255,0.4)");
-        glow.addColorStop(1, "rgba(160,195,255,0)");
-        ctx.fillStyle = glow;
-        ctx.beginPath();
-        ctx.arc(sx, sy, 22 * scale, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.globalAlpha = 1;
 
       raf = requestAnimationFrame(frame);
     };
@@ -214,7 +162,6 @@ export default function LandingBackdrop() {
     const stop = () => {
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
-      last = 0;
     };
     const onVisibility = () => (document.visibilityState === "visible" ? start() : stop());
 
@@ -225,13 +172,11 @@ export default function LandingBackdrop() {
     const ro = new ResizeObserver(resize);
     ro.observe(canvas);
     window.addEventListener("resize", resize);
-    window.addEventListener("pointermove", onPointer, { passive: true });
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       stop();
       ro.disconnect();
       window.removeEventListener("resize", resize);
-      window.removeEventListener("pointermove", onPointer);
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
