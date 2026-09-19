@@ -78,12 +78,15 @@ export type Route =
   | { name: "shift"; shiftId: string }
   | { name: "wall" }
   | { name: "organize" }
+  | { name: "home" }
   | { name: "join"; code: string }
   | { name: "community"; communityId: string };
 
 export function parseHash(hash: string): Route {
   const q = hash.indexOf("?");
   const path = (q === -1 ? hash : hash.slice(0, q)).replace(/^#/, "");
+  // No route (or an in-page anchor like "#how") is the landing page; "#/" is the live board.
+  if (!path.startsWith("/")) return { name: "home" };
   if (path === "/wall") return { name: "wall" };
   if (path === "/organize") return { name: "organize" };
   const j = path.match(/^\/join\/([^/]+)$/);

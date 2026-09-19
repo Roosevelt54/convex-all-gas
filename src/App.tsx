@@ -20,6 +20,7 @@ import {
   usePersistentFlag,
 } from "./util";
 import Board from "./components/Board";
+import Landing from "./components/Landing";
 import CommunityBar from "./components/CommunityBar";
 import { presenceScope, useCommunityId, useScopeArgs } from "./community";
 import ShiftSheet from "./components/ShiftSheet";
@@ -405,6 +406,8 @@ export default function App(): JSX.Element {
       </div>
     </>
   );
+
+  if (route.name === "home") return <Landing />;
 
   if (route.name === "wall") {
     return (
