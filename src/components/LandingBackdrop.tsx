@@ -141,18 +141,18 @@ export default function LandingBackdrop() {
       const farRing = ring.map((v) => at(v, far));
 
       // Far face, then the side wall as one clean silhouette, then the near face on top.
-      fill(farRing, "rgb(42,61,101)");
-      fill(hull([...nearRing, ...farRing]), "rgb(68,97,154)");
+      fill(farRing, "rgb(28,41,72)");
+      fill(hull([...nearRing, ...farRing]), "rgb(48,68,115)");
       // How square-on the near face is — its brightness, so the turn reads as a turn.
       const facing = Math.abs(cosA * cosB);
-      // 1.1x so the face lands on the masthead badge's own #8fb4ff rather than a dimmed version.
-      const lit = Math.min(1.1, (0.55 + facing * 0.45) * 1.1);
+      // A deeper blue than the flat masthead badge: solid enough to sit behind the headline.
+      const lit = 0.62 + facing * 0.38;
       const ch = (v: number) => Math.min(255, Math.round(v * lit));
-      fill(nearRing, `rgb(${ch(143)},${ch(180)},${ch(255)})`);
+      fill(nearRing, `rgb(${ch(96)},${ch(128)},${ch(196)})`);
 
       // The dots ride the near face. They vanish naturally as it turns edge-on.
       if (facing > 0.06) {
-        const dotColor = `rgb(${ch(244)},${ch(246)},${ch(250)})`;
+        const dotColor = `rgb(${ch(232)},${ch(238)},${ch(248)})`;
         fill(dot.map((v) => at(v, near - 0.004)), dotColor);
         fill(pip.map((v) => at(v, near - 0.004)), dotColor);
       }
