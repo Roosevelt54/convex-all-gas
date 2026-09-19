@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { Infer, v } from "convex/values";
 import { query } from "./_generated/server";
 import { Doc, Id } from "./_generated/dataModel";
 import { changeKindValidator, shiftStatusValidator } from "./schema";
@@ -129,13 +129,13 @@ export const snapshot = query({
 
     const community = await resolveCommunity(ctx, args.communityId);
     if (!community) {
-      return { generatedAt: now, community: null, access: "missing" as const, projects: [], shifts: [], stats: emptyStats };
+      return { generatedAt: now, community: null, access: "missing" as const, projects: [] as Infer<typeof snapshotProject>[], shifts: [] as Infer<typeof snapshotShift>[], stats: emptyStats };
     }
     const summary = { _id: community._id, name: community.name, isPublic: community.isPublic };
     const volunteer = args.deviceKey === undefined ? null : await resolveVolunteer(ctx, args.deviceKey);
     if (!(await canAccessCommunity(ctx, community, volunteer))) {
       // Nothing about a private community's shifts leaves the server for an outsider.
-      return { generatedAt: now, community: summary, access: "locked" as const, projects: [], shifts: [], stats: emptyStats };
+      return { generatedAt: now, community: summary, access: "locked" as const, projects: [] as Infer<typeof snapshotProject>[], shifts: [] as Infer<typeof snapshotShift>[], stats: emptyStats };
     }
 
     // One community's own shifts only. Reading Date.now() to build an index RANGE is fine;

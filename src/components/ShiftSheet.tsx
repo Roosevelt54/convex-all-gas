@@ -223,6 +223,7 @@ export default function ShiftSheet(props: {
         {
           position,
           handle: me?.volunteer?.handle ?? "You",
+          username: null,
           glyph: me?.volunteer?.glyph ?? "YO",
           colorIndex: me?.volunteer?.colorIndex ?? 0,
           isYou: true,
