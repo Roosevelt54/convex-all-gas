@@ -1,6 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { internalMutation, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
+import { isClientDeviceKey, resolveVolunteer } from "./lib";
 
 /** A Convex document id rendered as a string is always this long. */
 const ID_LENGTH = 32;
@@ -32,10 +33,10 @@ export const ping = mutation({
     const scope = validateScope(args.scope);
     const now = Date.now();
 
-    const volunteer = await ctx.db
-      .query("volunteers")
-      .withIndex("by_device_key", (q) => q.eq("deviceKey", args.deviceKey))
-      .unique();
+    // Reserved server-minted keys never reach presence; a signed-in caller resolves to their
+    // account's row, a signed-out one to the device's guest row.
+    if (!isClientDeviceKey(args.deviceKey)) return null;
+    const volunteer = await resolveVolunteer(ctx, args.deviceKey);
     if (!volunteer) return null;
 
     const existing = await ctx.db
@@ -82,6 +83,7 @@ export const leave = mutation({
   args: { deviceKey: v.string(), scope: v.string() },
   returns: v.null(),
   handler: async (ctx, args) => {
+    if (!isClientDeviceKey(args.deviceKey)) return null;
     const existing = await ctx.db
       .query("presence")
       .withIndex("by_device_scope", (q) =>

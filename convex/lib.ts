@@ -1,6 +1,8 @@
 import { ConvexError } from "convex/values";
-import { MutationCtx } from "./_generated/server";
+import { getAuthUserId } from "@convex-dev/auth/server";
+import { MutationCtx, QueryCtx } from "./_generated/server";
 import { Doc, Id } from "./_generated/dataModel";
+import { internal } from "./_generated/api";
 
 export const WINDOW_BACK_MS = 2 * 3600_000;
 export const WINDOW_FWD_MS = 7 * 86400_000;
@@ -8,6 +10,13 @@ export const OVERLAP_LOOKBACK_MS = 12 * 3600_000;
 export const HUMAN_TOUCH_GRACE_MS = 90_000;
 export const RATE_WINDOW_MS = 60_000;
 export const RATE_MAX_WRITES = 40;
+export const COLOR_COUNT = 8;
+
+/** Device keys minted by the SERVER. A client that sends one is trying to impersonate. */
+export const SEED_KEY_PREFIX = "seed:";
+export const ACCOUNT_KEY_PREFIX = "acct:";
+const DEVICE_KEY_MIN = 8;
+const DEVICE_KEY_MAX = 64;
 
 export type ChangeKind = Doc<"shifts">["lastChangeKind"];
 export type ActivityKind = Doc<"activity">["kind"];
@@ -62,8 +71,65 @@ export function sanitizeHandle(raw: string): string {
   return cleaned;
 }
 
+/** Trim + lowercase. The account id stored by the Password provider is this exact string. */
+export function normalizeUsername(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+/** Same rules as assertClientDeviceKey, as a boolean for queries (which must never throw). */
+export function isClientDeviceKey(deviceKey: string): boolean {
+  return (
+    deviceKey.length >= DEVICE_KEY_MIN &&
+    deviceKey.length <= DEVICE_KEY_MAX &&
+    !deviceKey.startsWith(SEED_KEY_PREFIX) &&
+    !deviceKey.startsWith(ACCOUNT_KEY_PREFIX)
+  );
+}
+
 /**
- * Resolves the acting volunteer from the device key and charges them one write against a
+ * Every public function that accepts a deviceKey runs this. The "seed:" and "acct:" prefixes are
+ * reserved for keys the server writes itself; accepting them from a client would let anyone act
+ * as a seeded neighbour or as an account-owned volunteer.
+ */
+export function assertClientDeviceKey(deviceKey: string): string {
+  if (!isClientDeviceKey(deviceKey)) {
+    throw new ConvexError({
+      code: "BAD_INPUT",
+      message: "That device key doesn't look right — reload the page.",
+    });
+  }
+  return deviceKey;
+}
+
+/**
+ * WHO IS THE CALLER. Read-only; returns null instead of throwing when nobody matches.
+ *
+ * Signed in: the account's volunteer row (by_user) — the device key is irrelevant.
+ * Signed out: the device's guest row, but NEVER a row owned by an account: such a row is only
+ * usable through a signed-in session.
+ */
+export async function resolveVolunteer(
+  ctx: QueryCtx | MutationCtx,
+  deviceKey: string,
+): Promise<Doc<"volunteers"> | null> {
+  const userId = await getAuthUserId(ctx);
+  if (userId !== null) {
+    return await ctx.db
+      .query("volunteers")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .unique();
+  }
+  if (!isClientDeviceKey(deviceKey)) return null;
+  const volunteer = await ctx.db
+    .query("volunteers")
+    .withIndex("by_device_key", (q) => q.eq("deviceKey", deviceKey))
+    .unique();
+  if (!volunteer || volunteer.userId !== undefined) return null;
+  return volunteer;
+}
+
+/**
+ * Resolves the acting volunteer (resolveVolunteer) and charges them one write against a
  * 40-per-minute budget. No mutation ever accepts a client-supplied volunteerId, so identity
  * cannot be spoofed by editing the request.
  */
@@ -71,10 +137,8 @@ export async function requireVolunteer(
   ctx: MutationCtx,
   deviceKey: string,
 ): Promise<Doc<"volunteers">> {
-  const volunteer = await ctx.db
-    .query("volunteers")
-    .withIndex("by_device_key", (q) => q.eq("deviceKey", deviceKey))
-    .unique();
+  assertClientDeviceKey(deviceKey);
+  const volunteer = await resolveVolunteer(ctx, deviceKey);
   if (!volunteer) {
     throw new ConvexError({
       code: "NO_IDENTITY",
@@ -147,6 +211,9 @@ export async function touchShift(
       waitlistCount?: number;
       waitlistSeq?: number;
       capacity?: number;
+      status?: Doc<"shifts">["status"];
+      // `undefined` removes the field (the job ran or was cancelled).
+      openJobId?: Id<"_scheduled_functions"> | undefined;
     };
   },
 ) {
@@ -162,6 +229,7 @@ export async function touchShift(
 }
 
 export type ClaimResult =
+  | { outcome: "not_open"; opensAt: number }
   | { outcome: "already"; kind: "spot" | "waitlist"; position: number }
   | {
       outcome: "conflict";
@@ -208,6 +276,10 @@ export async function applyClaim(
   if (shift.status === "cancelled") {
     throw new ConvexError({ code: "CANCELLED", message: "That shift was cancelled." });
   }
+  // TIMED UNLOCK, server-enforced: a return value (the UI shows the countdown), not an error.
+  if (shift.status === "scheduled") {
+    return { outcome: "not_open", opensAt: shift.opensAt ?? 0 };
+  }
 
   // Idempotency: a double-tap, a retried mutation, or a stale optimistic click can never
   // create a second claim.
@@ -237,6 +309,9 @@ export async function applyClaim(
     if (row.kind !== "spot") continue;
     if (row.endsAt > shift.startsAt && row.startsAt < shift.endsAt) {
       const other = await ctx.db.get(row.shiftId);
+      // A spot on a cancelled (or deleted) shift commits you to nothing, so it must not block
+      // the replacement shift an organizer posts in its place.
+      if (!other || other.status === "cancelled") continue;
       return {
         outcome: "conflict",
         conflictShiftId: row.shiftId,
@@ -425,6 +500,16 @@ export async function applyRelease(
     throw new ConvexError({ code: "NOT_YOURS", message: "You don't have a spot on that shift." });
   }
 
+  // A cancelled shift is not happening: releasing just clears your claim. Promoting the waitlist
+  // here would move a neighbour INTO a cancelled shift.
+  if (shift.status === "cancelled") {
+    await ctx.db.delete(mine._id);
+    const spots = await readSpotClaims(ctx, shiftId);
+    const wl = await readWaitlist(ctx, shiftId);
+    await ctx.db.patch(shiftId, { filledCount: spots.length, waitlistCount: wl.length });
+    return mine.kind === "waitlist" ? { outcome: "left_waitlist" } : { outcome: "released", promoted: null };
+  }
+
   if (mine.kind === "waitlist") {
     await ctx.db.delete(mine._id);
     const wl = await readWaitlist(ctx, shiftId);
@@ -512,4 +597,50 @@ export async function applyRelease(
     isSim,
   });
   return { outcome: "released", promoted: null };
+}
+
+/**
+ * The one "scheduled -> open" transition, shared by the runAt job (organize.openShift) and the
+ * organizer's "Open now" (organize.openNow). Idempotent: anything not scheduled is left alone.
+ * Returns whether it opened the shift.
+ */
+export async function openScheduledShift(
+  ctx: MutationCtx,
+  shiftId: Id<"shifts">,
+): Promise<boolean> {
+  const shift = await ctx.db.get(shiftId);
+  if (!shift || shift.status !== "scheduled") return false;
+  await touchShift(ctx, shift, {
+    kind: "opened",
+    actorName: "Crewcall",
+    isSim: false,
+    patch: { status: "open", openJobId: undefined },
+  });
+  await logActivity(ctx, {
+    kind: "opened",
+    projectId: shift.projectId,
+    shiftId,
+    actorName: "Crewcall",
+    message: `${shift.title} is now open — claim a spot`,
+    isSim: false,
+  });
+  return true;
+}
+
+/** Cancels a pending open job. A job that already ran or was cancelled is not an error. */
+export async function cancelOpenJob(ctx: MutationCtx, shift: Doc<"shifts">): Promise<void> {
+  if (shift.openJobId === undefined) return;
+  const job = await ctx.db.system.get(shift.openJobId);
+  if (job && (job.state.kind === "pending" || job.state.kind === "inProgress")) {
+    await ctx.scheduler.cancel(shift.openJobId);
+  }
+}
+
+/** Used by organize.createShift; lives here so every scheduler reference sits beside the helpers. */
+export async function scheduleOpen(
+  ctx: MutationCtx,
+  shiftId: Id<"shifts">,
+  opensAt: number,
+): Promise<Id<"_scheduled_functions">> {
+  return await ctx.scheduler.runAt(opensAt, internal.organize.openShift, { shiftId });
 }

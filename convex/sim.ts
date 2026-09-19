@@ -197,10 +197,17 @@ export const tick = internalMutation({
       return null;
     }
 
+    // SEEDED SHIFTS ONLY. A real organizer's shift must never receive a simulated claim or
+    // release, and it must not skew the fill steering either.
+    // Read through by_seed_start, not by_start + filter: otherwise a burst of real shifts could
+    // fill the take() window and leave the pulse with nothing to act on.
     const shifts = await ctx.db
       .query("shifts")
-      .withIndex("by_start", (q) =>
-        q.gte("startsAt", now - WINDOW_BACK_MS).lte("startsAt", now + WINDOW_FWD_MS),
+      .withIndex("by_seed_start", (q) =>
+        q
+          .eq("isSeed", true)
+          .gte("startsAt", now - WINDOW_BACK_MS)
+          .lte("startsAt", now + WINDOW_FWD_MS),
       )
       .take(60);
 
@@ -225,9 +232,11 @@ export const tick = internalMutation({
     const preferRelease =
       globalFill > FILL_HIGH ? true : globalFill < FILL_LOW ? false : Math.random() >= CLAIM_BIAS;
 
-    const seedVolunteers = (await ctx.db.query("volunteers").take(MAX_VOLUNTEER_SCAN)).filter(
-      (person) => person.isSeed,
-    );
+    // Indexed, so seeded neighbours stay findable however many real people have joined since.
+    const seedVolunteers = await ctx.db
+      .query("volunteers")
+      .withIndex("by_seed", (q) => q.eq("isSeed", true))
+      .take(MAX_VOLUNTEER_SCAN);
 
     // If the preferred action has no candidate, fall back to the other before giving up;
     // a tick that does nothing at all is only for when neither action is possible.
@@ -269,10 +278,11 @@ export const watchdog = internalMutation({
       }
     }
 
-    // Prune the ticker: if the table is past 300 rows, drop the oldest 50.
+    // Prune the ticker: past 300 SIMULATED rows, drop the oldest 50 of them. Real people's and
+    // organizers' history (posted / claimed / cancelled) is never pruned.
     const oldest = await ctx.db
       .query("activity")
-      .withIndex("by_created")
+      .withIndex("by_sim_created", (q) => q.eq("isSim", true))
       .take(ACTIVITY_MAX_ROWS + 1);
     if (oldest.length > ACTIVITY_MAX_ROWS) {
       for (const row of oldest.slice(0, ACTIVITY_PRUNE_BATCH)) {

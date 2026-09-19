@@ -9,7 +9,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import {
@@ -17,9 +17,13 @@ import {
   isoAttr,
   relativePast,
   relativeStart,
+  routeHref,
   useEscape,
   useFocusTrap,
 } from "../util";
+import Countdown from "./Countdown";
+import { PersonName } from "./Person";
+import "./ShiftSheet.css";
 
 /** Six accent tokens exist in styles.css; accentIndex/colorIndex can exceed that, so fold. */
 const ACCENT_COUNT = 6;
@@ -46,6 +50,35 @@ function errorMessage(err: unknown): string {
     if (typeof message === "string" && message.length > 0) return message;
   }
   return "Something went wrong. Try that again in a moment.";
+}
+
+/** The ConvexError code, so NO_ACCOUNT can offer a sign-in button instead of a dead end. */
+function errorCode(err: unknown): string | null {
+  const data = (err as { data?: unknown } | null | undefined)?.data;
+  if (data && typeof data === "object" && "code" in data) {
+    const code = (data as { code?: unknown }).code;
+    if (typeof code === "string") return code;
+  }
+  return null;
+}
+
+/** Same pattern as the board: never blocks the tap, absorbs old-Safari's non-promise return. */
+function requestNotifyPermission(): void {
+  try {
+    if (!("Notification" in window)) return;
+    if (Notification.permission !== "default") return;
+    void Notification.requestPermission().catch(() => undefined);
+  } catch {
+    /* unsupported — the in-app alert still works */
+  }
+}
+
+/** "9:00 AM" today, "Sat 9:00 AM" on any other day: the words on the locked Claim button. */
+function openTimeLabel(opensAt: number, now: number): string {
+  const at = new Date(opensAt);
+  const time = at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  if (at.toDateString() === new Date(now).toDateString()) return time;
+  return `${at.toLocaleDateString(undefined, { weekday: "short" })} ${time}`;
 }
 
 function plural(n: number, one: string, many: string): string {
@@ -95,6 +128,8 @@ type Outcome = {
   body: string | null;
   announcement: string;
   alternative: Alternative | null;
+  /** Set only for the "not_open" outcome: the panel shows the live countdown to this instant. */
+  opensAt: number | null;
 };
 
 export default function ShiftSheet(props: {
@@ -103,8 +138,10 @@ export default function ShiftSheet(props: {
   now: number;
   announce: (msg: string) => void;
   onClose: () => void;
+  onOpenAccount: () => void;
 }): JSX.Element {
-  const { shiftId, deviceKey, now, announce, onClose } = props;
+  const { shiftId, deviceKey, now, announce, onClose, onOpenAccount } = props;
+  const { isAuthenticated } = useConvexAuth();
 
   const trapRef = useFocusTrap(true);
   useEscape(onClose, true);
@@ -159,7 +196,15 @@ export default function ShiftSheet(props: {
 
     const detailArgs = { shiftId: args.shiftId, deviceKey: args.deviceKey };
     const local = localStore.getQuery(api.shifts.detail, detailArgs);
-    if (!local || !local.shift || local.yourClaim || local.openPositions.length === 0) return;
+    if (
+      !local ||
+      !local.shift ||
+      local.shift.status !== "open" ||
+      local.yourClaim ||
+      local.openPositions.length === 0
+    ) {
+      return;
+    }
 
     // Mirror the server's allocator exactly: the preferred spot when it is genuinely free,
     // otherwise the lowest free one.
@@ -182,6 +227,7 @@ export default function ShiftSheet(props: {
           colorIndex: me?.volunteer?.colorIndex ?? 0,
           isYou: true,
           isSeed: false,
+          verified: me?.volunteer?.verified ?? false,
         },
       ].sort((a, b) => a.position - b.position),
       openPositions: local.openPositions.filter((p) => p !== position),
@@ -246,13 +292,93 @@ export default function ShiftSheet(props: {
 
   const addCapacity = useMutation(api.shifts.addCapacity);
 
+  /**
+   * "Notify me" flips in the same frame as the tap — the pressed state, the waiting count, the
+   * board card behind the sheet and the "You" panel's interest list — and the server reconciles
+   * all four with the recomputed count.
+   */
+  const toggleInterest = useMutation(api.shifts.toggleInterest).withOptimisticUpdate(
+    (localStore, args) => {
+      const detailArgs = { shiftId: args.shiftId, deviceKey: args.deviceKey };
+      const local = localStore.getQuery(api.shifts.detail, detailArgs);
+      if (!local || !local.shift || local.shift.status !== "scheduled") return;
+      const was = local.youAreInterested;
+      const delta = was ? -1 : 1;
+      localStore.setQuery(api.shifts.detail, detailArgs, {
+        ...local,
+        shift: {
+          ...local.shift,
+          interestCount: Math.max(0, (local.shift.interestCount ?? 0) + delta),
+        },
+        youAreInterested: !was,
+      });
+
+      const mine = localStore.getQuery(api.board.myCommitments, { deviceKey: args.deviceKey });
+      if (mine) {
+        localStore.setQuery(
+          api.board.myCommitments,
+          { deviceKey: args.deviceKey },
+          {
+            ...mine,
+            interests: was
+              ? mine.interests.filter((id) => id !== args.shiftId)
+              : mine.interests.includes(args.shiftId)
+                ? mine.interests
+                : [...mine.interests, args.shiftId],
+          },
+        );
+      }
+
+      const snap = localStore.getQuery(api.board.snapshot, {});
+      if (snap) {
+        localStore.setQuery(
+          api.board.snapshot,
+          {},
+          {
+            ...snap,
+            shifts: snap.shifts.map((s) =>
+              s._id === args.shiftId
+                ? { ...s, interestCount: Math.max(0, s.interestCount + delta) }
+                : s,
+            ),
+          },
+        );
+      }
+    },
+  );
+
+  const openNow = useMutation(api.organize.openNow);
+  const cancelShift = useMutation(api.organize.cancelShift);
+
   /* -------------------------------------------------------------- state -- */
 
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [problemCode, setProblemCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [gridOpen, setGridOpen] = useState(false);
   const [activeSpot, setActiveSpot] = useState(0);
+  const [interestBusy, setInterestBusy] = useState(false);
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
+
+  const primaryRef = useRef<HTMLButtonElement | null>(null);
+  const notifyFocusedRef = useRef(false);
+  const cancelTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const keepShiftRef = useRef<HTMLButtonElement | null>(null);
+  const organizerHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const askedPermissionRef = useRef(false);
+  const prevStatusRef = useRef<string | null>(null);
+  const openAnnouncedRef = useRef(false);
+
+  const fail = useCallback((err: unknown) => {
+    setProblem(errorMessage(err));
+    setProblemCode(errorCode(err));
+  }, []);
+
+  const clearProblem = useCallback(() => {
+    setProblem(null);
+    setProblemCode(null);
+  }, []);
 
   const callSeq = useRef(0);
   const announcedRef = useRef(-1);
@@ -288,6 +414,36 @@ export default function ShiftSheet(props: {
   const waitingCount = shift?.waitlistCount ?? waitlist.length;
   const isFull = shift !== null && spotsLeft === 0;
   const isCancelled = shift?.status === "cancelled";
+  const isScheduled = shift?.status === "scheduled";
+  const opensAt = isScheduled ? (shift?.opensAt ?? null) : null;
+  const interestCount = shift?.interestCount ?? 0;
+  const youAreInterested = detail?.youAreInterested ?? false;
+  const canOrganize = detail?.canOrganize ?? false;
+  const hasOrganizer = project?.organizerId !== undefined;
+  const canAddSpots = !hasOrganizer || canOrganize;
+  const shiftTitle = shift?.title ?? "";
+  const shiftStatus = shift?.status ?? null;
+
+  /**
+   * TIMED UNLOCK, SEEN LIVE. The server's scheduled function flips the shift to "open"; this
+   * effect only notices that flip in the subscription. It speaks once, and moves focus to the
+   * now-live Claim button only when the keyboard user was already standing on the locked one
+   * (or on "Notify me", which unmounts on open and would otherwise drop focus to <body>).
+   */
+  useEffect(() => {
+    const previous = prevStatusRef.current;
+    prevStatusRef.current = shiftStatus;
+    if (previous !== "scheduled" || shiftStatus !== "open") return;
+    if (openAnnouncedRef.current) return;
+    openAnnouncedRef.current = true;
+    announce(`${shiftTitle} is open — you can claim now`);
+    setOutcome((current) => (current && current.opensAt !== null ? null : current));
+    const node = primaryRef.current;
+    if (node && (document.activeElement === node || notifyFocusedRef.current)) {
+      notifyFocusedRef.current = false;
+      node.focus();
+    }
+  }, [shiftStatus, shiftTitle, announce]);
 
   const takenBy = useMemo(() => {
     const map = new Map<number, string>();
@@ -321,7 +477,7 @@ export default function ShiftSheet(props: {
     async (target: Id<"shifts">, preferredPosition?: number, targetLabel?: string) => {
       const callId = ++callSeq.current;
       setBusy(true);
-      setProblem(null);
+      clearProblem();
       try {
         const result = await claim({
           deviceKey,
@@ -331,7 +487,19 @@ export default function ShiftSheet(props: {
         const where = targetLabel ?? shift?.title ?? "this shift";
         const when = targetLabel ? "" : whenText;
 
-        if (result.outcome === "claimed") {
+        if (result.outcome === "not_open") {
+          // A designed state, not an error: the organizer's timer is enforced by the server.
+          const at = openTimeLabel(result.opensAt, Date.now());
+          setOutcome({
+            callId,
+            tone: "plain",
+            headline: `Not open yet — claims open at ${at}`,
+            body: `The organizer set a start time for claims on ${where}, and the server holds every spot until then — nobody can get in early. Tap Notify me and we'll tell you the moment it opens.`,
+            announcement: `${where} is not open for claims yet. It opens at ${at}. Nothing was claimed.`,
+            alternative: null,
+            opensAt: result.opensAt,
+          });
+        } else if (result.outcome === "claimed") {
           const spotNumber = result.position + 1;
           setOutcome({
             callId,
@@ -340,6 +508,7 @@ export default function ShiftSheet(props: {
             body: `${where}${when ? `, ${when}` : ""}. ${result.spotsLeft} ${plural(result.spotsLeft, "spot", "spots")} left after you.`,
             announcement: `Spot ${spotNumber} claimed. You're confirmed for ${where}${when ? `, ${when}` : ""}.`,
             alternative: null,
+            opensAt: null,
           });
         } else if (result.outcome === "reseated") {
           const asked = (result.requestedPosition ?? 0) + 1;
@@ -351,6 +520,7 @@ export default function ShiftSheet(props: {
             body: `A neighbour took spot ${asked} a moment before your click landed, so the server seated you in the lowest free spot instead of failing. You are confirmed for ${where}${when ? `, ${when}` : ""}.`,
             announcement: `Spot ${asked} was just taken. We put you in spot ${got}.`,
             alternative: null,
+            opensAt: null,
           });
         } else if (result.outcome === "already") {
           setOutcome({
@@ -369,6 +539,7 @@ export default function ShiftSheet(props: {
                 ? `You already have spot ${result.position + 1} at ${where}.`
                 : `You are already on the waitlist for ${where}.`,
             alternative: null,
+            opensAt: null,
           });
         } else if (result.outcome === "conflict") {
           setOutcome({
@@ -378,6 +549,7 @@ export default function ShiftSheet(props: {
             body: `You are already committed to ${result.conflictTitle}, which starts ${absolutePoint(result.conflictStartsAt)}. Release that spot first if you would rather be here.`,
             announcement: `That overlaps ${result.conflictTitle}, starting ${absolutePoint(result.conflictStartsAt)}. Nothing was claimed.`,
             alternative: null,
+            opensAt: null,
           });
         } else if (result.outcome === "waitlisted") {
           setOutcome({
@@ -387,15 +559,16 @@ export default function ShiftSheet(props: {
             body: "If anyone releases, the front of the queue moves into the exact spot they vacate — no refresh, no re-claim.",
             announcement: `Last spot went to ${result.lastActorName}. You're number ${result.rank} on the waitlist for ${where}.`,
             alternative: result.alternative,
+            opensAt: null,
           });
         }
       } catch (err) {
-        setProblem(errorMessage(err));
+        fail(err);
       } finally {
         setBusy(false);
       }
     },
-    [claim, deviceKey, shift, whenText, capacity],
+    [claim, deviceKey, shift, whenText, capacity, clearProblem, fail],
   );
 
   const onPrimary = useCallback(() => {
@@ -404,8 +577,9 @@ export default function ShiftSheet(props: {
       announce("That shift was cancelled, so there is nothing to claim.");
       return;
     }
-    // Deliberately still calls claim when you already hold something: the mutation is idempotent
-    // and returns the "already" outcome, which renders as calm designed copy rather than an error.
+    // Deliberately still calls claim when you already hold something, or when the shift is still
+    // scheduled: the mutation is idempotent and answers "already" / "not_open", which render as
+    // calm designed copy (the latter with the countdown) — proof the lock is server-side.
     void runClaim(shift._id);
   }, [shift, isCancelled, runClaim, announce]);
 
@@ -419,7 +593,7 @@ export default function ShiftSheet(props: {
     }
     const callId = ++callSeq.current;
     setBusy(true);
-    setProblem(null);
+    clearProblem();
     try {
       const result = await release({ deviceKey, shiftId: shift._id });
       if (result.outcome === "left_waitlist") {
@@ -430,6 +604,7 @@ export default function ShiftSheet(props: {
           body: `Everyone behind you at ${shift.title} moved up one place.`,
           announcement: `You left the waitlist for ${shift.title}.`,
           alternative: null,
+          opensAt: null,
         });
       } else if (result.promoted) {
         setOutcome({
@@ -439,6 +614,7 @@ export default function ShiftSheet(props: {
           body: "The front of the waitlist took the exact position you vacated, in the same transaction. Every other open window already shows it.",
           announcement: `You released your spot at ${shift.title}. ${result.promoted.handle} moved off the waitlist into it.`,
           alternative: null,
+          opensAt: null,
         });
       } else {
         setOutcome({
@@ -448,14 +624,15 @@ export default function ShiftSheet(props: {
           body: `Nobody was waiting, so ${shift.title} now has ${spotsLeft + 1} ${plural(spotsLeft + 1, "spot", "spots")} open.`,
           announcement: `You released your spot at ${shift.title}. It is open again.`,
           alternative: null,
+          opensAt: null,
         });
       }
     } catch (err) {
-      setProblem(errorMessage(err));
+      fail(err);
     } finally {
       setBusy(false);
     }
-  }, [shift, yourClaim, release, deviceKey, spotsLeft, announce]);
+  }, [shift, yourClaim, release, deviceKey, spotsLeft, announce, clearProblem, fail]);
 
   const onAddCapacity = useCallback(async () => {
     if (!shift) return;
@@ -467,7 +644,7 @@ export default function ShiftSheet(props: {
     }
     const callId = ++callSeq.current;
     setBusy(true);
-    setProblem(null);
+    clearProblem();
     try {
       const result = await addCapacity({ deviceKey, shiftId: shift._id, delta: CAPACITY_DELTA });
       const promoted = result.promotedHandles;
@@ -487,13 +664,114 @@ export default function ShiftSheet(props: {
             ? `${CAPACITY_DELTA} spots added. ${promoted.length} ${plural(promoted.length, "neighbour was", "neighbours were")} promoted: ${listNames(promoted)}.`
             : `${CAPACITY_DELTA} spots added at ${shift.title}. Nobody was waiting, so nobody was promoted.`,
         alternative: null,
+        opensAt: null,
       });
     } catch (err) {
-      setProblem(errorMessage(err));
+      fail(err);
     } finally {
       setBusy(false);
     }
-  }, [shift, addCapacity, deviceKey, announce]);
+  }, [shift, addCapacity, deviceKey, announce, clearProblem, fail]);
+
+  const onToggleInterest = useCallback(async () => {
+    if (!shift || !isScheduled || interestBusy) return;
+    const turningOn = !youAreInterested;
+    if (turningOn && !askedPermissionRef.current) {
+      askedPermissionRef.current = true;
+      requestNotifyPermission(); // fire-and-forget: never blocks the toggle
+    }
+    setInterestBusy(true);
+    clearProblem();
+    try {
+      const result = await toggleInterest({ deviceKey, shiftId: shift._id });
+      const others = Math.max(0, result.count - (result.interested ? 1 : 0));
+      announce(
+        result.interested
+          ? `We'll tell you when ${shift.title} opens. ${others} other ${plural(others, "neighbour is", "neighbours are")} waiting too.`
+          : `Okay, no alert for ${shift.title}.`,
+      );
+    } catch (err) {
+      fail(err);
+    } finally {
+      setInterestBusy(false);
+    }
+  }, [
+    shift,
+    isScheduled,
+    interestBusy,
+    youAreInterested,
+    toggleInterest,
+    deviceKey,
+    announce,
+    clearProblem,
+    fail,
+  ]);
+
+  const onOpenNow = useCallback(async () => {
+    if (!shift || !isScheduled || busy) return;
+    const callId = ++callSeq.current;
+    setBusy(true);
+    clearProblem();
+    try {
+      await openNow({ shiftId: shift._id });
+      // The status flip itself arrives through the subscription, and the unlock effect above
+      // announces "open — you can claim now"; this panel only records who pressed it.
+      announcedRef.current = callId;
+      setOutcome({
+        callId,
+        tone: "good",
+        headline: "Opened early",
+        body: `You opened ${shift.title} for claims ahead of its timer. Everyone who tapped Notify me gets the alert now.`,
+        announcement: `${shift.title} opened early.`,
+        alternative: null,
+        opensAt: null,
+      });
+      // "Open now" unmounts once the shift is open (the mutation promise resolves only after the
+      // subscription reflects the write), so park focus instead of dropping it to <body>.
+      window.requestAnimationFrame(() => organizerHeadingRef.current?.focus());
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }, [shift, isScheduled, busy, openNow, clearProblem, fail]);
+
+  const beginCancel = useCallback(() => {
+    setConfirmingCancel(true);
+    // Land on the safe choice: Enter on the confirm step must never cancel by accident.
+    window.requestAnimationFrame(() => keepShiftRef.current?.focus());
+  }, []);
+
+  const keepShift = useCallback(() => {
+    setConfirmingCancel(false);
+    window.requestAnimationFrame(() => cancelTriggerRef.current?.focus());
+  }, []);
+
+  const onConfirmCancel = useCallback(async () => {
+    if (!shift || isCancelled || busy) return;
+    const callId = ++callSeq.current;
+    setBusy(true);
+    clearProblem();
+    try {
+      await cancelShift({ shiftId: shift._id });
+      setConfirmingCancel(false);
+      setOutcome({
+        callId,
+        tone: "warn",
+        headline: "Shift cancelled",
+        body: `${shift.title} is marked cancelled on every screen. People who held spots keep seeing it, labelled Cancelled, so nobody turns up to an empty meeting point.`,
+        announcement: `${shift.title} was cancelled.`,
+        alternative: null,
+        opensAt: null,
+      });
+      // The Cancel controls unmount with the status flip, so park focus on the section heading.
+      window.requestAnimationFrame(() => organizerHeadingRef.current?.focus());
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }, [shift, isCancelled, busy, cancelShift, clearProblem, fail]);
 
   /**
    * RACE TEST. Two tabs on one laptop share localStorage, so without `?as=new` the second window
@@ -618,20 +896,28 @@ export default function ShiftSheet(props: {
     );
   }
 
-  const primaryLabel = isFull ? "Join the waitlist" : "Claim a spot";
-  const primaryName = isFull
-    ? `Join the waitlist for ${shift.title}, ${whenText}, full with ${waitingCount} ${plural(waitingCount, "neighbour", "neighbours")} waiting`
-    : `Claim a spot at ${shift.title}, ${whenText}, ${meterText}`;
+  const lockedLabel =
+    opensAt !== null ? `Opens at ${openTimeLabel(opensAt, now)}` : "Not open for claims yet";
+  const primaryLabel = isScheduled ? lockedLabel : isFull ? "Join the waitlist" : "Claim a spot";
+  const primaryName = isScheduled
+    ? `${lockedLabel} — ${shift.title} is not open for claims yet`
+    : isFull
+      ? `Join the waitlist for ${shift.title}, ${whenText}, full with ${waitingCount} ${plural(waitingCount, "neighbour", "neighbours")} waiting`
+      : `Claim a spot at ${shift.title}, ${whenText}, ${meterText}`;
 
   const primaryBlockedReason = isCancelled
     ? "This shift was cancelled, so nothing can be claimed."
-    : yourClaim
-      ? yourClaim.kind === "spot"
-        ? `You already hold spot ${yourClaim.position + 1} here. Release it below if you want to give it up.`
-        : `You are already #${yourClaim.waitlistRank ?? 1} on the waitlist here.`
-      : null;
+    : isScheduled
+      ? `The organizer set claims to open ${opensAt !== null ? absolutePoint(opensAt) : "later"}. The server holds every spot until then, so nobody can get in early — tap Notify me to hear the moment it opens.`
+      : yourClaim
+        ? yourClaim.kind === "spot"
+          ? `You already hold spot ${yourClaim.position + 1} here. Release it below if you want to give it up.`
+          : `You are already #${yourClaim.waitlistRank ?? 1} on the waitlist here.`
+        : null;
 
   const capacityBlocked = shift.capacity + CAPACITY_DELTA > MAX_CAPACITY;
+  const organizerName = project?.organizerName ?? null;
+  const waitingForOpen = `${interestCount} ${plural(interestCount, "neighbour", "neighbours")} waiting`;
 
   return (
     <div className="backdrop">
@@ -652,6 +938,26 @@ export default function ShiftSheet(props: {
               {project?.title ?? "A neighbourhood project"}
               {project ? ` · ${project.orgName}` : ""}
             </p>
+            {organizerName ? (
+              <p className="sheet-organizer">
+                Organized by <PersonName handle={organizerName} verified />
+              </p>
+            ) : project && !hasOrganizer && project.isSeed ? (
+              <p className="sheet-organizer muted">
+                Demo project — seeded so anyone can try every control.
+              </p>
+            ) : null}
+            {isScheduled && opensAt !== null ? (
+              <p className="sheet-unlock">
+                <span className="badge sheet-unlock__badge">
+                  <Countdown to={opensAt} label="Opens in" />
+                </span>
+                <span>
+                  Claims open{" "}
+                  <time dateTime={isoAttr(opensAt)}>{absolutePoint(opensAt)}</time>
+                </span>
+              </p>
+            ) : null}
           </div>
           <button type="button" className="btn btn--ghost btn--sm" onClick={onClose}>
             Close
@@ -659,9 +965,16 @@ export default function ShiftSheet(props: {
         </div>
 
         {problem ? (
-          <p className="notice notice--warn" role="alert">
-            {problem}
-          </p>
+          <div className="notice notice--warn stack" role="alert">
+            <p>{problem}</p>
+            {problemCode === "NO_ACCOUNT" ? (
+              <p>
+                <button type="button" className="btn btn--primary btn--sm" onClick={onOpenAccount}>
+                  Sign in
+                </button>
+              </p>
+            ) : null}
+          </div>
         ) : null}
 
         {/* ------------------------------------------------------- the facts -- */}
@@ -737,6 +1050,13 @@ export default function ShiftSheet(props: {
             aria-labelledby="sheet-outcome"
           >
             <h3 id="sheet-outcome">{outcome.headline}</h3>
+            {outcome.opensAt !== null && isScheduled ? (
+              <p className="sheet-unlock">
+                <span className="badge sheet-unlock__badge">
+                  <Countdown to={outcome.opensAt} label="Opens in" />
+                </span>
+              </p>
+            ) : null}
             {outcome.body ? <p>{outcome.body}</p> : null}
             {outcome.alternative ? (
               <button
@@ -762,11 +1082,13 @@ export default function ShiftSheet(props: {
 
           <div className="row">
             <button
+              ref={primaryRef}
               type="button"
               className="btn btn--primary"
               onClick={onPrimary}
               aria-disabled={primaryBlockedReason !== null || busy}
               aria-label={primaryName}
+              aria-describedby={primaryBlockedReason ? "sheet-primary-why" : undefined}
             >
               {primaryLabel}
             </button>
@@ -785,35 +1107,103 @@ export default function ShiftSheet(props: {
               {yourClaim && yourClaim.kind === "waitlist" ? "Leave the waitlist" : "Release"}
             </button>
 
-            <button
-              type="button"
-              className="btn btn--secondary"
-              onClick={() => void onAddCapacity()}
-              aria-disabled={capacityBlocked || busy}
-              aria-label={`Open ${CAPACITY_DELTA} more spots at ${shift.title}, promoting up to ${CAPACITY_DELTA} waiting neighbours`}
-            >
-              +{CAPACITY_DELTA} spots
-            </button>
+            {/* Seeded demo projects keep the public promotion generator; on a real organizer's
+                project only that organizer may grow capacity (the server enforces NOT_YOURS). */}
+            {canAddSpots ? (
+              <button
+                type="button"
+                className="btn btn--secondary"
+                onClick={() => void onAddCapacity()}
+                aria-disabled={capacityBlocked || busy}
+                aria-label={`Open ${CAPACITY_DELTA} more spots at ${shift.title}, promoting up to ${CAPACITY_DELTA} waiting neighbours`}
+              >
+                +{CAPACITY_DELTA} spots
+              </button>
+            ) : null}
           </div>
 
           {/* Adjacent explanatory text for the aria-disabled controls above: they stay focusable
               and explain themselves rather than becoming holes in the tab order. */}
-          {primaryBlockedReason ? <p className="muted">{primaryBlockedReason}</p> : null}
+          {primaryBlockedReason ? (
+            <p id="sheet-primary-why" className="muted">
+              {primaryBlockedReason}
+            </p>
+          ) : null}
+
+          {isScheduled ? (
+            <div className="sheet-notify stack">
+              <div className="row">
+                <button
+                  type="button"
+                  className={
+                    youAreInterested
+                      ? "btn btn--secondary sheet-notify__toggle sheet-notify__toggle--on"
+                      : "btn btn--secondary sheet-notify__toggle"
+                  }
+                  aria-pressed={youAreInterested}
+                  aria-disabled={interestBusy}
+                  aria-describedby="sheet-notify-help"
+                  onClick={() => void onToggleInterest()}
+                  onFocus={() => {
+                    notifyFocusedRef.current = true;
+                  }}
+                  onBlur={() => {
+                    notifyFocusedRef.current = false;
+                  }}
+                >
+                  <span aria-hidden="true" className="sheet-notify__mark">
+                    {youAreInterested ? "✓" : "+"}
+                  </span>
+                  Notify me
+                </button>
+                <span className="badge tnum">{waitingForOpen}</span>
+              </div>
+              <p id="sheet-notify-help" className="muted">
+                {youAreInterested
+                  ? "You're on the alert list. When the timer runs out you'll get an in-app alert, plus a browser notification if you allowed them. No account needed."
+                  : "Get an in-app alert (and a browser notification, if you allow it) the moment claims open. No account needed."}
+              </p>
+            </div>
+          ) : null}
+
           {yourClaim === null ? (
             <p className="muted">
               Release does nothing until you hold a spot or a waitlist place on this shift.
             </p>
           ) : null}
-          {capacityBlocked ? (
-            <p className="muted">
-              This shift is already at the {MAX_CAPACITY}-person ceiling, so no more spots can be
-              added.
-            </p>
-          ) : null}
-          <p className="muted">
-            +{CAPACITY_DELTA} spots grows capacity and promotes the front of the waitlist in the
-            same transaction — the fastest way to watch a promotion land in two windows at once.
-          </p>
+          {canAddSpots ? (
+            <>
+              {capacityBlocked ? (
+                <p className="muted">
+                  This shift is already at the {MAX_CAPACITY}-person ceiling, so no more spots can
+                  be added.
+                </p>
+              ) : null}
+              <p className="muted">
+                +{CAPACITY_DELTA} spots grows capacity and promotes the front of the waitlist in
+                the same transaction — the fastest way to watch a promotion land in two windows at
+                once.
+              </p>
+            </>
+          ) : (
+            <div className="stack">
+              <p className="muted">
+                Only {organizerName ?? "the organizer"} can add spots to this shift.
+                {isAuthenticated ? "" : " Are you the organizer? Sign in to manage it."}
+              </p>
+              {isAuthenticated ? null : (
+                <p>
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--sm"
+                    onClick={onOpenAccount}
+                  >
+                    Sign in to organize
+                  </button>
+                </p>
+              )}
+            </div>
+          )}
 
           <p>
             <a
@@ -830,6 +1220,97 @@ export default function ShiftSheet(props: {
             yourself for the last spot.
           </p>
         </section>
+
+        {/* ----------------------------------------------- organizer controls -- */}
+        {canOrganize ? (
+          <section className="stack sheet-organize" aria-labelledby="sheet-organize-heading">
+            <h3 id="sheet-organize-heading" tabIndex={-1} ref={organizerHeadingRef}>
+              Organizer controls
+            </h3>
+            <p className="muted">You posted this shift, so only you can see these.</p>
+
+            {isCancelled ? (
+              <p className="muted">
+                This shift is cancelled. People who held spots still see it, labelled Cancelled.
+              </p>
+            ) : (
+              <>
+                <div className="row">
+                  {isScheduled ? (
+                    <button
+                      type="button"
+                      className="btn btn--primary"
+                      onClick={() => void onOpenNow()}
+                      aria-disabled={busy}
+                      aria-describedby="sheet-open-now-help"
+                    >
+                      Open now
+                    </button>
+                  ) : null}
+                  <button
+                    ref={cancelTriggerRef}
+                    type="button"
+                    className="btn btn--danger"
+                    aria-expanded={confirmingCancel}
+                    aria-controls="sheet-cancel-confirm"
+                    onClick={confirmingCancel ? keepShift : beginCancel}
+                  >
+                    Cancel shift
+                  </button>
+                </div>
+                {isScheduled ? (
+                  <p id="sheet-open-now-help" className="muted">
+                    Open now skips the timer: claims open for everyone immediately and everyone
+                    who tapped Notify me is alerted.
+                  </p>
+                ) : null}
+
+                {confirmingCancel ? (
+                  <div
+                    id="sheet-cancel-confirm"
+                    className="sheet-confirm stack"
+                    role="group"
+                    aria-labelledby="sheet-cancel-question"
+                    aria-describedby="sheet-cancel-detail"
+                  >
+                    <p id="sheet-cancel-question" className="sheet-confirm__question">
+                      Cancel {shift.title} for everyone?
+                    </p>
+                    <p id="sheet-cancel-detail">
+                      {filled} {plural(filled, "person holds a spot", "people hold spots")} and{" "}
+                      {waitingCount} {plural(waitingCount, "is", "are")} on the waitlist. Every
+                      screen shows it as cancelled at once. This cannot be undone.
+                    </p>
+                    <div className="row">
+                      <button
+                        ref={keepShiftRef}
+                        type="button"
+                        className="btn btn--secondary"
+                        onClick={keepShift}
+                      >
+                        Keep the shift
+                      </button>
+                      <button
+                        type="button"
+                        className="btn sheet-confirm__destroy"
+                        onClick={() => void onConfirmCancel()}
+                        aria-disabled={busy}
+                      >
+                        Yes, cancel shift
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            )}
+
+            <p>
+              <a className="btn btn--ghost btn--sm" href={routeHref("/organize")}>
+                Manage in Organizer
+              </a>
+            </p>
+          </section>
+        ) : null}
 
         {/* ------------------------------------------- optional specific spot -- */}
         <section className="stack" aria-labelledby="sheet-grid-heading">
@@ -923,11 +1404,15 @@ export default function ShiftSheet(props: {
                         >
                           {person.glyph}
                         </span>
-                        <span>
-                          Spot {position + 1} —{" "}
-                          {person.isYou ? `${person.handle} (you)` : person.handle}
+                        <span className="sheet-person">
+                          <span>Spot {position + 1} —</span>
+                          <PersonName
+                            handle={person.handle}
+                            verified={person.verified}
+                            isSeed={person.isSeed}
+                            you={person.isYou}
+                          />
                         </span>
-                        {person.isSeed ? <span className="badge badge--sim">sim</span> : null}
                       </>
                     ) : (
                       <span>Spot {position + 1} — open</span>
@@ -951,11 +1436,15 @@ export default function ShiftSheet(props: {
                   <span className="glyph" aria-hidden="true" style={glyphVars(person.colorIndex)}>
                     {person.glyph}
                   </span>
-                  <span>
-                    #{person.rank} — {person.isYou ? `${person.handle} (you)` : person.handle}
+                  <span className="sheet-person">
+                    <span>#{person.rank} —</span>
+                    <PersonName
+                      handle={person.handle}
+                      verified={person.verified}
+                      isSeed={person.isSeed}
+                      you={person.isYou}
+                    />
                   </span>
-                  {person.isYou ? <span className="badge badge--you">That's you</span> : null}
-                  {person.isSeed ? <span className="badge badge--sim">sim</span> : null}
                 </li>
               ))}
             </ol>

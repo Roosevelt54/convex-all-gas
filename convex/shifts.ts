@@ -1,4 +1,5 @@
 import { ConvexError, v } from "convex/values";
+import { getAuthUserId } from "@convex-dev/auth/server";
 import { mutation, query } from "./_generated/server";
 import { Doc, Id } from "./_generated/dataModel";
 import schema from "./schema";
@@ -10,8 +11,12 @@ import {
   readSpotClaims,
   readWaitlist,
   requireVolunteer,
+  resolveVolunteer,
   touchShift,
 } from "./lib";
+
+/** Bound on how many "Notify me" rows are counted per shift. */
+const INTEREST_COUNT_LIMIT = 500;
 
 /** Hard ceiling on a single +N tap, and on what a shift can ever grow to. */
 const MAX_DELTA = 4;
@@ -27,6 +32,7 @@ const rosterEntry = v.object({
   colorIndex: v.number(),
   isYou: v.boolean(),
   isSeed: v.boolean(),
+  verified: v.boolean(),
 });
 
 type RosterEntry = {
@@ -36,6 +42,7 @@ type RosterEntry = {
   colorIndex: number;
   isYou: boolean;
   isSeed: boolean;
+  verified: boolean;
 };
 
 const waitlistEntry = v.object({
@@ -47,6 +54,7 @@ const waitlistEntry = v.object({
   colorIndex: v.number(),
   isYou: v.boolean(),
   isSeed: v.boolean(),
+  verified: v.boolean(),
 });
 
 type WaitlistEntry = {
@@ -58,6 +66,7 @@ type WaitlistEntry = {
   colorIndex: number;
   isYou: boolean;
   isSeed: boolean;
+  verified: boolean;
 };
 
 const yourClaimValidator = v.object({
@@ -83,6 +92,8 @@ const emptyDetail = {
   waitlist: [] as WaitlistEntry[],
   yourClaim: null,
   activity: [] as Doc<"activity">[],
+  youAreInterested: false,
+  canOrganize: false,
 };
 
 /**
@@ -111,6 +122,8 @@ export const detail = query({
     waitlist: v.array(waitlistEntry),
     yourClaim: v.union(yourClaimValidator, v.null()),
     activity: v.array(schema.doc("activity")),
+    youAreInterested: v.boolean(),
+    canOrganize: v.boolean(),
   }),
   handler: async (ctx, args) => {
     const shift = await ctx.db.get(args.shiftId);
@@ -118,12 +131,25 @@ export const detail = query({
 
     const project = await ctx.db.get(shift.projectId);
 
-    // An unknown device is a race with volunteers.ensure, not an error.
-    const volunteer = await ctx.db
-      .query("volunteers")
-      .withIndex("by_device_key", (q) => q.eq("deviceKey", args.deviceKey))
-      .unique();
+    // Signed in → the account's row; signed out → the device's guest row. An unknown device is
+    // a race with volunteers.ensure, not an error.
+    const volunteer = await resolveVolunteer(ctx, args.deviceKey);
     const youId: Id<"volunteers"> | null = volunteer?._id ?? null;
+
+    const userId = await getAuthUserId(ctx);
+    const canOrganize =
+      userId !== null && project?.organizerId !== undefined && project.organizerId === userId;
+
+    let youAreInterested = false;
+    if (youId !== null) {
+      const interest = await ctx.db
+        .query("interest")
+        .withIndex("by_shift_volunteer", (q) =>
+          q.eq("shiftId", args.shiftId).eq("volunteerId", youId),
+        )
+        .unique();
+      youAreInterested = interest !== null;
+    }
 
     // Same index and same ordering as lib.readSpotClaims / lib.readWaitlist; inlined here
     // because those helpers are typed for MutationCtx.
@@ -149,6 +175,7 @@ export const detail = query({
         colorIndex: holder?.colorIndex ?? 0,
         isYou: youId !== null && claim.volunteerId === youId,
         isSeed: claim.isSeed,
+        verified: holder?.userId !== undefined && holder !== null,
       });
     }
     roster.sort((a, b) => a.position - b.position);
@@ -173,6 +200,7 @@ export const detail = query({
         colorIndex: holder?.colorIndex ?? 0,
         isYou: youId !== null && claim.volunteerId === youId,
         isSeed: claim.isSeed,
+        verified: holder?.userId !== undefined && holder !== null,
       });
     }
 
@@ -201,7 +229,17 @@ export const detail = query({
       .order("desc")
       .take(DETAIL_ACTIVITY_LIMIT);
 
-    return { shift, project, roster, openPositions, waitlist, yourClaim, activity };
+    return {
+      shift,
+      project,
+      roster,
+      openPositions,
+      waitlist,
+      yourClaim,
+      activity,
+      youAreInterested,
+      canOrganize,
+    };
   },
 });
 
@@ -218,6 +256,8 @@ const alternativeValidator = v.object({
  * and a reseat when your preferred spot was taken a moment before you clicked.
  */
 const claimResultValidator = v.union(
+  // Timed unlock: the shift is posted but not claimable yet. The UI shows the countdown.
+  v.object({ outcome: v.literal("not_open"), opensAt: v.number() }),
   v.object({
     outcome: v.literal("already"),
     kind: v.union(v.literal("spot"), v.literal("waitlist")),
@@ -336,6 +376,18 @@ export const addCapacity = mutation({
     if (shift.status === "cancelled") {
       throw new ConvexError({ code: "CANCELLED", message: "That shift was cancelled." });
     }
+    // Real projects belong to their organizer. Seeded demo projects have no organizer and keep
+    // the public "+2 spots" control, so a judge can still manufacture a live promotion.
+    const project = await ctx.db.get(shift.projectId);
+    if (project?.organizerId !== undefined) {
+      const userId = await getAuthUserId(ctx);
+      if (userId !== project.organizerId) {
+        throw new ConvexError({
+          code: "NOT_YOURS",
+          message: "Only this project's organizer can add spots.",
+        });
+      }
+    }
     if (shift.capacity + delta > MAX_CAPACITY) {
       throw new ConvexError({
         code: "BAD_INPUT",
@@ -414,5 +466,53 @@ export const addCapacity = mutation({
     });
 
     return { promotedHandles, capacity: newCapacity };
+  },
+});
+
+/**
+ * "Notify me" on a shift that is not open yet. Toggles the caller's interest row and recomputes
+ * the "N neighbours waiting" count from the index (never +/- 1, so it cannot drift under
+ * concurrent taps: every toggle reads the same by_shift range, so Convex OCC serializes them).
+ *
+ * The notification itself is client-side: when a shift in myCommitments.interests flips from
+ * scheduled to open — a flip written by the scheduled organize.openShift — the page alerts.
+ */
+export const toggleInterest = mutation({
+  args: { deviceKey: v.string(), shiftId: v.id("shifts") },
+  returns: v.object({ interested: v.boolean(), count: v.number() }),
+  handler: async (ctx, args) => {
+    const volunteer = await requireVolunteer(ctx, args.deviceKey);
+    const shift = await ctx.db.get(args.shiftId);
+    if (!shift) {
+      throw new ConvexError({ code: "GONE", message: "That shift is no longer available." });
+    }
+    if (shift.status !== "scheduled") {
+      throw new ConvexError({ code: "BAD_INPUT", message: "That shift is already open." });
+    }
+
+    const existing = await ctx.db
+      .query("interest")
+      .withIndex("by_shift_volunteer", (q) =>
+        q.eq("shiftId", args.shiftId).eq("volunteerId", volunteer._id),
+      )
+      .unique();
+    if (existing) {
+      await ctx.db.delete(existing._id);
+    } else {
+      await ctx.db.insert("interest", {
+        shiftId: args.shiftId,
+        volunteerId: volunteer._id,
+        createdAt: Date.now(),
+      });
+    }
+
+    const count = (
+      await ctx.db
+        .query("interest")
+        .withIndex("by_shift", (q) => q.eq("shiftId", args.shiftId))
+        .take(INTEREST_COUNT_LIMIT)
+    ).length;
+    await ctx.db.patch(args.shiftId, { interestCount: count });
+    return { interested: existing === null, count };
   },
 });

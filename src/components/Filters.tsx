@@ -21,6 +21,10 @@ export const TIME_WINDOWS: Array<{ id: TimeWindow; label: string }> = [
  * rows that are already on screen, so the same board always produces the same answer.
  *
  * Higher is more needed. A shift nobody can join scores -1 and is never picked.
+ *
+ * Scheduled shifts are not claimable yet, so they always score in (0, 1) — strictly below
+ * every open shift that still needs people (the smallest open score is > 2) — and the one
+ * opening soonest scores highest among them. Cancelled and full shifts score -1.
  */
 export function scoreNeed(
   shift: ShiftRow,
@@ -28,6 +32,11 @@ export function scoreNeed(
   selectedSkills: readonly string[],
 ): number {
   const spotsLeft = Math.max(0, shift.capacity - shift.filledCount);
+  if (shift.status === "scheduled" && spotsLeft > 0 && shift.startsAt > now) {
+    const opensAt = shift.opensAt ?? shift.startsAt;
+    const hoursToOpen = Math.max(0, (opensAt - now) / 3_600_000);
+    return 1 / (hoursToOpen + 1.01);
+  }
   if (shift.status !== "open" || spotsLeft === 0) return -1;
 
   const hoursOut = Math.max(0, (shift.startsAt - now) / 3_600_000);
@@ -165,7 +174,8 @@ export default function Filters(props: {
         </button>
         <p className="muted" id="filters-needed-note">
           Ranked on this device from spots left, hours until start and your skill chips, then
-          focus moves to that card. No model, no key, no network call.
+          focus moves to that card. Shifts that have not opened yet come after every open
+          shift that needs people. No model, no key, no network call.
         </p>
       </div>
 

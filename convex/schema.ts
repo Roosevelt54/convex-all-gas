@@ -1,7 +1,28 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
+import { authTables } from "@convex-dev/auth/server";
+
+export const shiftStatusValidator = v.union(
+  v.literal("open"),
+  v.literal("scheduled"),
+  v.literal("cancelled"),
+);
+
+export const changeKindValidator = v.union(
+  v.literal("seeded"),
+  v.literal("claimed"),
+  v.literal("released"),
+  v.literal("promoted"),
+  v.literal("waitlisted"),
+  v.literal("capacity_added"),
+  v.literal("posted"),
+  v.literal("opened"),
+  v.literal("cancelled"),
+);
 
 export default defineSchema({
+  ...authTables,
+
   projects: defineTable({
     slug: v.string(),
     title: v.string(),
@@ -12,7 +33,12 @@ export default defineSchema({
     tags: v.array(v.string()),
     isSeed: v.boolean(),
     createdAt: v.number(),
-  }).index("by_slug", ["slug"]),
+    // Absent on seeded demo projects, which keep their public demo controls.
+    organizerId: v.optional(v.id("users")),
+    organizerName: v.optional(v.string()),
+  })
+    .index("by_slug", ["slug"])
+    .index("by_organizer", ["organizerId"]),
 
   shifts: defineTable({
     projectId: v.id("projects"),
@@ -28,20 +54,18 @@ export default defineSchema({
     // Monotonic allocator for waitlist positions; never decremented, so FIFO order
     // survives arbitrary removals from the middle of the queue.
     waitlistSeq: v.number(),
-    status: v.union(v.literal("open"), v.literal("cancelled")),
+    // "scheduled" = posted but not yet claimable; organize.openShift flips it at opensAt.
+    status: shiftStatusValidator,
+    opensAt: v.optional(v.number()),
+    openJobId: v.optional(v.id("_scheduled_functions")),
+    // Denormalized "N neighbours waiting", recomputed from interest.by_shift on every toggle.
+    interestCount: v.optional(v.number()),
     meetPoint: v.string(),
     bring: v.array(v.string()),
     skillTag: v.string(),
     // Causal attribution: lets a card say WHY it just changed with zero joins.
     lastChangeAt: v.number(),
-    lastChangeKind: v.union(
-      v.literal("seeded"),
-      v.literal("claimed"),
-      v.literal("released"),
-      v.literal("promoted"),
-      v.literal("waitlisted"),
-      v.literal("capacity_added"),
-    ),
+    lastChangeKind: changeKindValidator,
     lastChangeActorName: v.string(),
     lastChangeIsSim: v.boolean(),
     // Last non-sim write. The pulse must not touch a shift within 90s of this.
@@ -50,7 +74,9 @@ export default defineSchema({
   })
     .index("by_project_start", ["projectId", "startsAt"])
     .index("by_start", ["startsAt"])
-    .index("by_status_start", ["status", "startsAt"]),
+    .index("by_status_start", ["status", "startsAt"])
+    // The pulse reads ONLY seeded shifts, so real shifts can never crowd them out of its read.
+    .index("by_seed_start", ["isSeed", "startsAt"]),
 
   claims: defineTable({
     shiftId: v.id("shifts"),
@@ -81,7 +107,14 @@ export default defineSchema({
     lastSeenAt: v.number(),
     writeCount: v.number(),
     writeWindowStart: v.number(),
-  }).index("by_device_key", ["deviceKey"]),
+    // Set when an account owns this row; its deviceKey is then "acct:<userId>" and the row is
+    // only reachable through a signed-in session, never through a client device key.
+    userId: v.optional(v.id("users")),
+    nameChosen: v.optional(v.boolean()),
+  })
+    .index("by_device_key", ["deviceKey"])
+    .index("by_user", ["userId"])
+    .index("by_seed", ["isSeed"]),
 
   // Liveness is STORED, never computed from Date.now() inside a query: Convex queries
   // do not re-run just because wall-clock time passed. presence.sweep WRITES
@@ -109,6 +142,9 @@ export default defineSchema({
       v.literal("reseated"),
       v.literal("filled"),
       v.literal("capacity_added"),
+      v.literal("posted"),
+      v.literal("opened"),
+      v.literal("cancelled"),
     ),
     projectId: v.optional(v.id("projects")),
     shiftId: v.optional(v.id("shifts")),
@@ -120,7 +156,19 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_created", ["createdAt"])
-    .index("by_shift_created", ["shiftId", "createdAt"]),
+    .index("by_shift_created", ["shiftId", "createdAt"])
+    // Lets the watchdog prune simulated rows only; real organizer history is never pruned.
+    .index("by_sim_created", ["isSim", "createdAt"]),
+
+  // "Notify me" taps on scheduled shifts.
+  interest: defineTable({
+    shiftId: v.id("shifts"),
+    volunteerId: v.id("volunteers"),
+    createdAt: v.number(),
+  })
+    .index("by_shift", ["shiftId"])
+    .index("by_shift_volunteer", ["shiftId", "volunteerId"])
+    .index("by_volunteer", ["volunteerId"]),
 
   // Exactly one row, key === "main".
   meta: defineTable({

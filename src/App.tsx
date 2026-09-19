@@ -7,11 +7,13 @@ import {
   type JSX,
   type MouseEvent,
 } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useConvexAuth, useMutation, useQuery } from "convex/react";
+import { useAuthActions } from "@convex-dev/auth/react";
 import { api } from "../convex/_generated/api";
 import { resolveDeviceKey, wantsFreshIdentity } from "./identity";
 import {
   prefersReducedMotion,
+  routeHref,
   useAnnouncer,
   useClock,
   useHashRoute,
@@ -20,7 +22,11 @@ import {
 import Board from "./components/Board";
 import ShiftSheet from "./components/ShiftSheet";
 import Wall from "./components/Wall";
+import Organize from "./components/Organize";
 import YouPopover from "./components/YouPopover";
+import AccountDialog from "./components/AccountDialog";
+import WelcomeDialog from "./components/WelcomeDialog";
+import { PersonName } from "./components/Person";
 
 /** Six accent tokens exist in styles.css; colorIndex is hash % 8, so fold it. */
 const ACCENT_COUNT = 6;
@@ -54,6 +60,37 @@ function readStoredTheme(): Theme | null {
   }
 }
 
+const NAME_SKIPPED_KEY = "crewcall.nameSkipped";
+
+function readNameSkipped(): boolean {
+  try {
+    return localStorage.getItem(NAME_SKIPPED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Fires an OS notification only when the person already granted permission. Never asks here. */
+function notifyOpened(title: string, onClick: () => void): void {
+  try {
+    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    const note = new Notification(`${title} is open — claim a spot`, {
+      body: "A shift you asked to hear about just opened on Crewcall.",
+    });
+    note.onclick = () => {
+      window.focus();
+      onClick();
+      note.close();
+    };
+  } catch {
+    // Some mobile browsers only allow notifications from a service worker. The in-app alert and
+    // the polite announcement still cover it.
+  }
+}
+
+type AccountMode = "signIn" | "signUp";
+type OpenedNotice = { shiftId: string; title: string };
+
 export default function App(): JSX.Element {
   /* ----------------------------------------------------------- identity -- */
   // Resolved ONCE. Re-resolving on every render would mint a new neighbour under
@@ -61,29 +98,39 @@ export default function App(): JSX.Element {
   const [deviceKey] = useState<string>(() => resolveDeviceKey());
   const [isRaceWindow] = useState<boolean>(() => wantsFreshIdentity());
 
+  const { isLoading: authLoading, isAuthenticated } = useConvexAuth();
+  const { signOut } = useAuthActions();
+
   const ensure = useMutation(api.volunteers.ensure);
   const [ensured, setEnsured] = useState<{
     handle: string;
     glyph: string;
     colorIndex: number;
+    verified: boolean;
   } | null>(null);
   const [identityReady, setIdentityReady] = useState(false);
-  const bootstrappedRef = useRef(false);
+  // The auth state the last ensure() was requested for; null = never requested yet.
+  const ensuredForRef = useRef<boolean | null>(null);
 
   useEffect(() => {
-    // StrictMode double-invokes effects in development; the ref makes the upsert fire once.
+    // Wait for Convex Auth to settle so a signed-in visitor is not first ensured as a guest.
+    if (authLoading) return;
+    // One request per identity: on load, then again whenever sign-in state flips (sign-in links
+    // this device's guest row to the account; sign-out hands the device a fresh guest).
+    // The ref makes StrictMode's double-invoked effect fire the upsert once per identity.
     // Deliberately NO cleanup/"alive" guard: StrictMode's simulated unmount would flip that
     // guard on the only in-flight request, and the early return on remount means no second
     // request exists to take its place — identityReady would never become true and the
     // presence heartbeat would never start. setState after unmount is a no-op in React 18+.
-    if (bootstrappedRef.current) return;
-    bootstrappedRef.current = true;
+    if (ensuredForRef.current === isAuthenticated) return;
+    ensuredForRef.current = isAuthenticated;
     void ensure({ deviceKey })
       .then((volunteer) => {
         setEnsured({
           handle: volunteer.handle,
           glyph: volunteer.glyph,
           colorIndex: volunteer.colorIndex,
+          verified: volunteer.verified,
         });
       })
       .catch(() => {
@@ -92,17 +139,18 @@ export default function App(): JSX.Element {
       .finally(() => {
         setIdentityReady(true);
       });
-  }, [ensure, deviceKey]);
+  }, [ensure, deviceKey, authLoading, isAuthenticated]);
 
   /* ------------------------------------------------------------- shared -- */
   const now = useClock(30_000);
   const [announcement, announce] = useAnnouncer();
   const [route, navigate] = useHashRoute();
 
-  // Live "you": myCommitments re-runs after a rename, so the chip follows the edit.
-  const mine = useQuery(api.board.myCommitments, { deviceKey });
-  const volunteer = mine?.volunteer ?? ensured;
+  // Live "who am I": re-runs after a rename, a sign-in or a sign-out.
+  const me = useQuery(api.volunteers.me, { deviceKey });
+  const volunteer = me ?? ensured;
 
+  const mine = useQuery(api.board.myCommitments, { deviceKey });
   const snapshot = useQuery(api.board.snapshot, {});
   const demo = useQuery(api.meta.demoState, {});
   const presence = useQuery(api.presence.onScope, { scope: "board" });
@@ -113,6 +161,7 @@ export default function App(): JSX.Element {
 
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
   const [youOpen, setYouOpen] = useState(false);
+  const [accountMode, setAccountMode] = useState<AccountMode | null>(null);
   const [proofDismissed, setProofDismissed] = usePersistentFlag("crewcall.proofDismissed", false);
 
   /* -------------------------------------------------------------- theme -- */
@@ -243,6 +292,101 @@ export default function App(): JSX.Element {
     navigate("/");
   }, [navigate]);
 
+  /* ----------------------------------------------------------- accounts -- */
+  // Deep entry points (organize screen, shift sheet, name step) are nearly always a guest who
+  // needs an account, so they open on "Create account"; the masthead button opens "Sign in".
+  // The two modes are one tap apart inside the dialog.
+  const openAccount = useCallback(() => {
+    setYouOpen(false);
+    setAccountMode("signUp");
+  }, []);
+
+  const closeAccount = useCallback(() => setAccountMode(null), []);
+
+  const doSignOut = useCallback(async () => {
+    try {
+      await signOut();
+      setAlertMessage(null);
+      announce("Signed out. You are browsing as a guest now; your spots stay with your account.");
+      setYouOpen(false);
+    } catch (err) {
+      setAlertMessage(errorMessage(err));
+    }
+  }, [signOut, announce]);
+
+  /* -------------------------------------------------------- name step -- */
+  const [nameSkipped, setNameSkipped] = useState<boolean>(() => readNameSkipped());
+  const [welcomeClosed, setWelcomeClosed] = useState(false);
+
+  const skipNameStep = useCallback(() => {
+    setNameSkipped(true);
+    try {
+      localStorage.setItem(NAME_SKIPPED_KEY, "1");
+    } catch {
+      // Private mode: skipped for this page's lifetime only.
+    }
+  }, []);
+
+  // Rendered over an already-live board; it never gates loading.
+  const welcomeMe =
+    !welcomeClosed &&
+    !nameSkipped &&
+    !isRaceWindow &&
+    !authLoading &&
+    !isAuthenticated &&
+    me &&
+    me.nameChosen === false &&
+    // Never stack two modal dialogs: wait until nothing else is open.
+    route.name !== "shift" &&
+    accountMode === null &&
+    !youOpen
+      ? me
+      : null;
+
+  /* ------------------------------------------------- "Notify me" watcher -- */
+  // Detected from subscription data: the server's scheduled function flips status to "open",
+  // and the snapshot subscription delivers it. The previous status per interested shift lives
+  // in a ref, so the first load (shifts that were already open) never alerts.
+  const interests = mine?.interests;
+  const shifts = snapshot?.shifts;
+  const prevStatusRef = useRef<Map<string, string>>(new Map());
+  const [openedNotices, setOpenedNotices] = useState<OpenedNotice[]>([]);
+
+  useEffect(() => {
+    if (interests === undefined || shifts === undefined) return;
+    const byId = new Map<string, (typeof shifts)[number]>(shifts.map((s) => [s._id, s]));
+    const prev = prevStatusRef.current;
+    const next = new Map<string, string>();
+    const opened: OpenedNotice[] = [];
+    for (const id of interests) {
+      const shift = byId.get(id);
+      if (!shift) continue;
+      if (prev.get(id) === "scheduled" && shift.status === "open") {
+        opened.push({ shiftId: id, title: shift.title });
+      }
+      next.set(id, shift.status);
+    }
+    prevStatusRef.current = next;
+    if (opened.length === 0) return;
+
+    setOpenedNotices((current) => [
+      ...current.filter((n) => !opened.some((o) => o.shiftId === n.shiftId)),
+      ...opened,
+    ]);
+    announce(
+      opened.length === 1
+        ? `${opened[0].title} is open — claim a spot.`
+        : `${opened.length} shifts you asked about are open: ${opened
+            .map((o) => o.title)
+            .join(", ")}.`,
+    );
+    for (const o of opened) notifyOpened(o.title, () => openShift(o.shiftId));
+  }, [interests, shifts, announce, openShift]);
+
+  const dismissNotice = useCallback((shiftId: string) => {
+    setOpenedNotices((current) => current.filter((n) => n.shiftId !== shiftId));
+  }, []);
+
   /* ------------------------------------------------------------- render -- */
   const liveRegions = (
     <>
@@ -265,11 +409,13 @@ export default function App(): JSX.Element {
   }
 
   const stats = snapshot?.stats;
+  const onOrganize = route.name === "organize";
+  const verified = volunteer?.verified ?? false;
 
   return (
     <div className="app">
       <a className="skip-link" href="#shift-list" onClick={onSkip}>
-        Skip to shifts
+        {onOrganize ? "Skip to main content" : "Skip to shifts"}
       </a>
 
       <header className="masthead">
@@ -288,6 +434,13 @@ export default function App(): JSX.Element {
                 {plural(stats.projectCount, "project", "projects")} ·{" "}
                 <strong className="tnum">{stats.criticalCount}</strong>{" "}
                 {plural(stats.criticalCount, "shift", "shifts")} critical
+                {stats.opensSoonCount > 0 ? (
+                  <>
+                    {" "}
+                    · <strong className="tnum">{stats.opensSoonCount}</strong>{" "}
+                    {plural(stats.opensSoonCount, "shift opens", "shifts open")} soon
+                  </>
+                ) : null}
               </>
             ) : (
               "Loading the board…"
@@ -295,6 +448,16 @@ export default function App(): JSX.Element {
           </p>
 
           <div className="masthead__actions">
+            {onOrganize ? (
+              <a className="btn btn--secondary btn--sm" href={routeHref("/")}>
+                Back to the board
+              </a>
+            ) : (
+              <a className="btn btn--secondary btn--sm" href={routeHref("/organize")}>
+                Organize shifts
+              </a>
+            )}
+
             <button type="button" className="btn btn--primary btn--sm" onClick={openWall}>
               Open wall display
             </button>
@@ -346,7 +509,9 @@ export default function App(): JSX.Element {
               aria-expanded={youOpen}
               aria-label={
                 volunteer
-                  ? `You are ${volunteer.handle}. Open your profile and commitments.`
+                  ? `You are ${volunteer.handle}${
+                      verified ? ", verified account" : ", guest"
+                    }. Open your profile and commitments.`
                   : "Open your profile and commitments"
               }
               onClick={() => setYouOpen(true)}
@@ -360,12 +525,35 @@ export default function App(): JSX.Element {
                   >
                     {volunteer.glyph}
                   </span>
-                  <span>{volunteer.handle}</span>
+                  {verified ? (
+                    <PersonName handle={volunteer.handle} verified />
+                  ) : (
+                    <span>{volunteer.handle}</span>
+                  )}
                 </>
               ) : (
                 <span>Naming you…</span>
               )}
             </button>
+
+            {authLoading ? null : isAuthenticated ? (
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm"
+                onClick={() => void doSignOut()}
+              >
+                Sign out
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn--secondary btn--sm"
+                aria-haspopup="dialog"
+                onClick={() => setAccountMode("signIn")}
+              >
+                Sign in
+              </button>
+            )}
 
             {isRaceWindow ? (
               <span className="badge badge--sim">
@@ -382,7 +570,40 @@ export default function App(): JSX.Element {
         </p>
       ) : null}
 
-      {proofDismissed ? null : (
+      {openedNotices.length > 0 ? (
+        // Deliberately not a live region: each opening is announced once via the polite region.
+        <section className="stack" aria-label="Shifts you asked to hear about">
+          {openedNotices.map((n) => (
+            <div className="notice notice--good" key={n.shiftId}>
+              <p>
+                <strong>{n.title}</strong> is open — claim a spot.
+              </p>
+              <p className="row">
+                <button
+                  type="button"
+                  className="btn btn--primary btn--sm"
+                  onClick={() => {
+                    dismissNotice(n.shiftId);
+                    openShift(n.shiftId);
+                  }}
+                >
+                  Open {n.title}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  aria-label={`Dismiss the notice about ${n.title}`}
+                  onClick={() => dismissNotice(n.shiftId)}
+                >
+                  Dismiss
+                </button>
+              </p>
+            </div>
+          ))}
+        </section>
+      ) : null}
+
+      {proofDismissed || onOrganize ? null : (
         <div className="proof-strip">
           <span>Two windows? Open the wall display and claim a spot — watch it change.</span>
           <button
@@ -395,7 +616,17 @@ export default function App(): JSX.Element {
         </div>
       )}
 
-      <Board deviceKey={deviceKey} now={now} announce={announce} onOpenShift={openShift} />
+      {onOrganize ? (
+        <Organize
+          deviceKey={deviceKey}
+          now={now}
+          announce={announce}
+          onOpenAccount={openAccount}
+          onOpenShift={openShift}
+        />
+      ) : (
+        <Board deviceKey={deviceKey} now={now} announce={announce} onOpenShift={openShift} />
+      )}
 
       {route.name === "shift" ? (
         <ShiftSheet
@@ -404,6 +635,7 @@ export default function App(): JSX.Element {
           now={now}
           announce={announce}
           onClose={closeShift}
+          onOpenAccount={openAccount}
         />
       ) : null}
 
@@ -414,6 +646,34 @@ export default function App(): JSX.Element {
           volunteer={volunteer}
           announce={announce}
           onClose={() => setYouOpen(false)}
+          onOpenAccount={openAccount}
+          onSignOut={doSignOut}
+        />
+      ) : null}
+
+      {welcomeMe ? (
+        <WelcomeDialog
+          deviceKey={deviceKey}
+          currentHandle={welcomeMe.handle}
+          announce={announce}
+          onJoined={() => setWelcomeClosed(true)}
+          onSkip={() => {
+            skipNameStep();
+            setWelcomeClosed(true);
+          }}
+          onOpenAccount={() => {
+            setWelcomeClosed(true);
+            setAccountMode("signUp");
+          }}
+        />
+      ) : null}
+
+      {accountMode !== null ? (
+        <AccountDialog
+          deviceKey={deviceKey}
+          initialMode={accountMode}
+          announce={announce}
+          onClose={closeAccount}
         />
       ) : null}
 

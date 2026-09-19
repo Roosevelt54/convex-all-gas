@@ -76,15 +76,33 @@ export function useClock(intervalMs = 30_000): number {
 export type Route =
   | { name: "board" }
   | { name: "shift"; shiftId: string }
-  | { name: "wall" };
+  | { name: "wall" }
+  | { name: "organize" };
 
 export function parseHash(hash: string): Route {
   const q = hash.indexOf("?");
   const path = (q === -1 ? hash : hash.slice(0, q)).replace(/^#/, "");
   if (path === "/wall") return { name: "wall" };
+  if (path === "/organize") return { name: "organize" };
   const m = path.match(/^\/shift\/([^/]+)$/);
   if (m) return { name: "shift", shiftId: decodeURIComponent(m[1]) };
   return { name: "board" };
+}
+
+/**
+ * The "?as=new" suffix when the current page is the race-test window, else "". Preserving it
+ * across in-app navigation matters: without it the race-test window silently reverts to being
+ * the same neighbour as the first window.
+ */
+function identitySuffix(): string {
+  const current = window.location.hash;
+  const q = current.indexOf("?");
+  return q !== -1 && current.slice(q).includes("as=new") ? "?as=new" : "";
+}
+
+/** An href for an in-app route ("/organize" → "#/organize"), keeping ?as=new when present. */
+export function routeHref(to: string): string {
+  return `#${to}${identitySuffix()}`;
 }
 
 /** Hash routing so deep links never need an SPA 404 fallback on convex.site. */
@@ -96,12 +114,7 @@ export function useHashRoute(): [Route, (to: string) => void] {
     return () => window.removeEventListener("hashchange", onChange);
   }, []);
   const navigate = useCallback((to: string) => {
-    // Preserve the ?as=new identity override across in-app navigation, or the race-test
-    // window silently reverts to being the same neighbour as the first window.
-    const current = window.location.hash;
-    const q = current.indexOf("?");
-    const suffix = q !== -1 && current.slice(q).includes("as=new") ? "?as=new" : "";
-    window.location.hash = `${to}${suffix}`;
+    window.location.hash = `${to}${identitySuffix()}`;
   }, []);
   return [route, navigate];
 }

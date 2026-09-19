@@ -1,0 +1,121 @@
+.account {
+  max-width: 30rem;
+}
+
+.account__modes {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.account__legend {
+  padding: 0;
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+/* Segmented control built from real radios: arrow keys, one tab stop, native semantics. */
+.account__seg {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-1);
+  padding: var(--sp-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+}
+
+.account__seg-option {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: var(--tap);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: calc(var(--radius-sm) - 2px);
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: center;
+}
+
+.account__seg-option input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.account__seg-option:has(input:checked) {
+  background: var(--primary);
+  color: var(--primary-ink);
+}
+
+.account__seg-option:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.account__field {
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.account__field > label {
+  font-weight: 650;
+  font-size: var(--fs-sm);
+}
+
+.account__field input[type="text"],
+.account__field input[type="password"] {
+  width: 100%;
+  min-height: var(--tap);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.account__field input[aria-invalid="true"] {
+  border-color: var(--danger);
+  border-width: 2px;
+}
+
+.account__password {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: stretch;
+}
+
+.account__password input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.account__password .btn {
+  min-height: var(--tap);
+  flex: 0 0 auto;
+}
+
+.account__hint {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+/* Weight plus wording mark an error, never colour alone. */
+.account__error {
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  color: var(--danger);
+}
+
+.account__explain {
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-sm);
+  gap: var(--sp-2);
+}

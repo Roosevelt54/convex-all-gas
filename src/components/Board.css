@@ -1,0 +1,61 @@
+/* Board-only additions. Tokens come from src/styles.css; nothing here overrides it. */
+
+/* --primary is >= 8:1 on --surface-sunken in both themes, so the badge reads as text. */
+.badge--opens {
+  color: var(--primary);
+  border-color: currentColor;
+}
+
+.shift__posted {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35em;
+}
+
+.shift__posted .person__name {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.shift__opens {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--line-strong);
+  background: var(--surface-sunken);
+  font-size: var(--fs-sm);
+}
+
+.shift__opens-at {
+  font-weight: 650;
+}
+
+.notify__icon {
+  width: 1.1em;
+  height: 1.1em;
+  flex: none;
+}
+
+.shift__note {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.shift__error {
+  font-size: var(--fs-sm);
+  color: var(--danger);
+  flex-basis: 100%;
+}
+
+.board__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+}

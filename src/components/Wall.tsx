@@ -3,13 +3,26 @@ import { useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
 import { absoluteWindow, isoAttr, relativePast, relativeStart } from "../util";
+import Countdown from "./Countdown";
+import { PersonName } from "./Person";
+import "./Board.css";
 
 type Snapshot = FunctionReturnType<typeof api.board.snapshot>;
 type ShiftRow = Snapshot["shifts"][number];
 
 const ACCENT_COUNT = 6;
 const URGENT_LIMIT = 9;
+const OPENING_LIMIT = 6;
 const FEED_LIMIT = 12;
+
+/** "Sat 9:00 AM" — the absolute instant beside every countdown. */
+function clockTime(ts: number): string {
+  return new Date(ts).toLocaleString(undefined, {
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
 
 function accentStyle(index: number): CSSProperties {
   return { "--shift-accent": `var(--accent-${index % ACCENT_COUNT})` } as CSSProperties;
@@ -52,6 +65,13 @@ export default function Wall({ now }: { deviceKey: string; now: number }): JSX.E
     .filter((s) => s.status === "open" && s.endsAt > now && spotsLeft(s) > 0)
     .sort((a, b) => spotsLeft(a) - spotsLeft(b) || a.startsAt - b.startsAt)
     .slice(0, URGENT_LIMIT);
+
+  // Timed unlocks, soonest first. The countdown is cosmetic: the server's scheduled function
+  // flips each one open and this list drops it the moment that write arrives.
+  const opening = snapshot.shifts
+    .filter((s) => s.status === "scheduled" && s.opensAt !== null && s.endsAt > now)
+    .sort((a, b) => (a.opensAt ?? 0) - (b.opensAt ?? 0) || a.startsAt - b.startsAt)
+    .slice(0, OPENING_LIMIT);
 
   const { spotsLeftTotal, criticalCount, projectCount } = snapshot.stats;
   const hereNow = presence?.count ?? 0;
@@ -105,6 +125,11 @@ export default function Wall({ now }: { deviceKey: string; now: number }): JSX.E
                 <li key={s._id} className="wall__shift" style={accentStyle(project?.accentIndex ?? 0)}>
                   <p className="shift__project">{project?.title ?? "Project"}</p>
                   <h3 className="shift__title">{s.title}</h3>
+                  {project !== undefined && !project.isSeed && project.organizerName ? (
+                    <p className="shift__posted">
+                      Posted by <PersonName handle={project.organizerName} verified />
+                    </p>
+                  ) : null}
                   <p className="muted">
                     <time dateTime={isoAttr(s.startsAt)}>
                       {relativeStart(s.startsAt, s.endsAt, now)} · {absoluteWindow(s.startsAt, s.endsAt)}
@@ -130,6 +155,43 @@ export default function Wall({ now }: { deviceKey: string; now: number }): JSX.E
           </ul>
         )}
       </section>
+
+      {opening.length > 0 ? (
+        <section aria-labelledby="wall-opening">
+          <h2 id="wall-opening" className="wall__label" style={{ marginBottom: "var(--sp-3)" }}>
+            Opening soon
+          </h2>
+          <ul className="wall__grid">
+            {opening.map((s) => {
+              const project = projectById.get(s.projectId);
+              const opensAt = s.opensAt ?? s.startsAt;
+              const waiting = s.interestCount;
+              return (
+                <li key={s._id} className="wall__shift" style={accentStyle(project?.accentIndex ?? 0)}>
+                  <p className="shift__project">{project?.title ?? "Project"}</p>
+                  <h3 className="shift__title">{s.title}</h3>
+                  {project !== undefined && !project.isSeed && project.organizerName ? (
+                    <p className="shift__posted">
+                      Posted by <PersonName handle={project.organizerName} verified />
+                    </p>
+                  ) : null}
+                  <p className="wall__shift-count">
+                    <Countdown to={opensAt} label="Opens in" />
+                  </p>
+                  <p className="muted">
+                    <time dateTime={isoAttr(opensAt)}>Opens {clockTime(opensAt)}</time>
+                    {" · "}
+                    {s.capacity} {s.capacity === 1 ? "spot" : "spots"}
+                  </p>
+                  <p className="badge badge--opens tnum" style={{ justifySelf: "start" }}>
+                    {waiting} {waiting === 1 ? "neighbour" : "neighbours"} waiting
+                  </p>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
 
       <section aria-labelledby="wall-feed">
         <h2 id="wall-feed" className="wall__label" style={{ marginBottom: "var(--sp-3)" }}>

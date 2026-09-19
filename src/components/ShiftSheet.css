@@ -1,0 +1,101 @@
+/* Shift sheet v2 additions. Tokens and base classes come from src/styles.css. */
+
+.sheet-person {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35em;
+}
+
+.sheet-organizer {
+  font-size: var(--fs-sm);
+}
+
+/* ---------------------------------------------------------- timed unlock -- */
+
+.sheet-unlock {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+}
+
+.sheet-unlock__badge {
+  color: var(--shift-accent, var(--primary));
+  border-color: currentColor;
+  font-variant-numeric: tabular-nums;
+}
+
+.sheet-notify {
+  padding: var(--sp-3);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+}
+
+.sheet-notify__toggle {
+  min-height: var(--tap);
+}
+
+.sheet-notify__mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.4em;
+  height: 1.4em;
+  border-radius: var(--radius-pill);
+  border: 1px solid currentColor;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.sheet-notify__toggle--on .sheet-notify__mark {
+  background: var(--primary-ink);
+  color: var(--primary);
+  border-color: var(--primary-ink);
+}
+
+/* ---------------------------------------------------- organizer controls -- */
+
+.sheet-organize {
+  padding: var(--sp-4);
+  border: 1px solid var(--line-strong);
+  border-left: 4px solid var(--shift-accent, var(--primary));
+  border-radius: var(--radius-sm);
+}
+
+.sheet-organize h3:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.sheet-confirm {
+  padding: var(--sp-3);
+  border: 2px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+}
+
+.sheet-confirm__question {
+  font-weight: 750;
+  color: var(--danger);
+}
+
+/* A filled danger button: the one irreversible action on the sheet looks like it. */
+.sheet-confirm__destroy {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--surface);
+  min-height: var(--tap);
+}
+
+.sheet-confirm__destroy:hover {
+  background: color-mix(in srgb, var(--danger) 85%, var(--text));
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .sheet-notify__mark {
+    transition: background-color 120ms ease, color 120ms ease;
+  }
+}

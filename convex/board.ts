@@ -1,7 +1,8 @@
 import { v } from "convex/values";
 import { query } from "./_generated/server";
 import { Doc, Id } from "./_generated/dataModel";
-import { OVERLAP_LOOKBACK_MS, WINDOW_BACK_MS, WINDOW_FWD_MS } from "./lib";
+import { changeKindValidator, shiftStatusValidator } from "./schema";
+import { OVERLAP_LOOKBACK_MS, WINDOW_BACK_MS, WINDOW_FWD_MS, resolveVolunteer } from "./lib";
 
 /** A shift is "critical" when it has <= 2 spots left AND starts inside this horizon. */
 const CRITICAL_HORIZON_MS = 48 * 3600_000;
@@ -15,6 +16,9 @@ const snapshotProject = v.object({
   locationLabel: v.string(),
   accentIndex: v.number(),
   tags: v.array(v.string()),
+  // Who posted it ("Posted by Mike ✓"); null on seeded demo projects.
+  organizerName: v.union(v.string(), v.null()),
+  isSeed: v.boolean(),
 });
 
 const snapshotShift = v.object({
@@ -27,18 +31,15 @@ const snapshotShift = v.object({
   capacity: v.number(),
   filledCount: v.number(),
   waitlistCount: v.number(),
-  status: v.union(v.literal("open"), v.literal("cancelled")),
+  status: shiftStatusValidator,
+  // Set only on scheduled shifts: when the server will open it for claims.
+  opensAt: v.union(v.number(), v.null()),
+  interestCount: v.number(),
+  isSeed: v.boolean(),
   meetPoint: v.string(),
   skillTag: v.string(),
   lastChangeAt: v.number(),
-  lastChangeKind: v.union(
-    v.literal("seeded"),
-    v.literal("claimed"),
-    v.literal("released"),
-    v.literal("promoted"),
-    v.literal("waitlisted"),
-    v.literal("capacity_added"),
-  ),
+  lastChangeKind: changeKindValidator,
   lastChangeActorName: v.string(),
   lastChangeIsSim: v.boolean(),
 });
@@ -51,6 +52,8 @@ type SnapshotProject = {
   locationLabel: string;
   accentIndex: number;
   tags: string[];
+  organizerName: string | null;
+  isSeed: boolean;
 };
 
 type SnapshotShift = {
@@ -64,6 +67,9 @@ type SnapshotShift = {
   filledCount: number;
   waitlistCount: number;
   status: Doc<"shifts">["status"];
+  opensAt: number | null;
+  interestCount: number;
+  isSeed: boolean;
   meetPoint: string;
   skillTag: string;
   lastChangeAt: number;
@@ -92,6 +98,7 @@ export const snapshot = query({
       criticalCount: v.number(),
       fullCount: v.number(),
       projectCount: v.number(),
+      opensSoonCount: v.number(),
     }),
   }),
   handler: async (ctx) => {
@@ -103,7 +110,8 @@ export const snapshot = query({
       .withIndex("by_start", (q) =>
         q.gte("startsAt", now - WINDOW_BACK_MS).lte("startsAt", now + WINDOW_FWD_MS),
       )
-      .take(60);
+      // Headroom for the ~30 demo shifts plus several organizers at their 20-shift cap.
+      .take(100);
 
     const shifts: SnapshotShift[] = rows.map((s) => ({
       _id: s._id,
@@ -116,6 +124,9 @@ export const snapshot = query({
       filledCount: s.filledCount,
       waitlistCount: s.waitlistCount,
       status: s.status,
+      opensAt: s.status === "scheduled" ? (s.opensAt ?? null) : null,
+      interestCount: s.interestCount ?? 0,
+      isSeed: s.isSeed,
       meetPoint: s.meetPoint,
       skillTag: s.skillTag,
       lastChangeAt: s.lastChangeAt,
@@ -144,13 +155,17 @@ export const snapshot = query({
         locationLabel: p.locationLabel,
         accentIndex: p.accentIndex,
         tags: p.tags,
+        organizerName: p.organizerName ?? null,
+        isSeed: p.isSeed,
       });
     }
 
     let spotsLeftTotal = 0;
     let criticalCount = 0;
     let fullCount = 0;
+    let opensSoonCount = 0;
     for (const s of shifts) {
+      if (s.status === "scheduled") opensSoonCount += 1;
       if (s.status !== "open") continue;
       const left = Math.max(0, s.capacity - s.filledCount);
       spotsLeftTotal += left;
@@ -170,6 +185,7 @@ export const snapshot = query({
         criticalCount,
         fullCount,
         projectCount: projects.length,
+        opensSoonCount,
       },
     };
   },
@@ -219,19 +235,33 @@ export const myCommitments = query({
   args: { deviceKey: v.string() },
   returns: v.object({
     volunteer: v.union(
-      v.object({ handle: v.string(), glyph: v.string(), colorIndex: v.number() }),
+      v.object({
+        handle: v.string(),
+        glyph: v.string(),
+        colorIndex: v.number(),
+        verified: v.boolean(),
+      }),
       v.null(),
     ),
     claims: v.array(commitmentRow),
+    // Shifts this person tapped "Notify me" on. The page alerts when one flips to open.
+    interests: v.array(v.id("shifts")),
   }),
   handler: async (ctx, args) => {
-    const volunteer = await ctx.db
-      .query("volunteers")
-      .withIndex("by_device_key", (q) => q.eq("deviceKey", args.deviceKey))
-      .unique();
+    // Signed in → the account's row; signed out → the device's guest row (never an
+    // account-owned one).
+    const volunteer = await resolveVolunteer(ctx, args.deviceKey);
     if (!volunteer) {
-      return { volunteer: null, claims: [] as CommitmentRow[] };
+      return { volunteer: null, claims: [] as CommitmentRow[], interests: [] as Id<"shifts">[] };
     }
+    const interests = (
+      await ctx.db
+        .query("interest")
+        .withIndex("by_volunteer", (q) => q.eq("volunteerId", volunteer._id))
+        // Newest first: old rows for shifts that already opened must never crowd out a fresh tap.
+        .order("desc")
+        .take(50)
+    ).map((i) => i.shiftId);
 
     const now = Date.now();
     const claims = await ctx.db
@@ -306,8 +336,10 @@ export const myCommitments = query({
         handle: volunteer.handle,
         glyph: volunteer.glyph,
         colorIndex: volunteer.colorIndex,
+        verified: volunteer.userId !== undefined,
       },
       claims: rows,
+      interests,
     };
   },
 });

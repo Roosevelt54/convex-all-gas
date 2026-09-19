@@ -9,10 +9,13 @@
  */
 
 import type * as activity from "../activity.js";
+import type * as auth from "../auth.js";
 import type * as board from "../board.js";
 import type * as crons from "../crons.js";
+import type * as http from "../http.js";
 import type * as lib from "../lib.js";
 import type * as meta from "../meta.js";
+import type * as organize from "../organize.js";
 import type * as presence from "../presence.js";
 import type * as seed from "../seed.js";
 import type * as shifts from "../shifts.js";
@@ -27,10 +30,13 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   activity: typeof activity;
+  auth: typeof auth;
   board: typeof board;
   crons: typeof crons;
+  http: typeof http;
   lib: typeof lib;
   meta: typeof meta;
+  organize: typeof organize;
   presence: typeof presence;
   seed: typeof seed;
   shifts: typeof shifts;

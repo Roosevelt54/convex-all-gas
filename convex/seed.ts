@@ -235,18 +235,29 @@ async function wipeSeeded(ctx: MutationCtx): Promise<void> {
   for (const row of await ctx.db.query("claims").take(WIPE_SCAN_LIMIT)) {
     if (row.isSeed || seededShiftIds.has(row.shiftId)) await ctx.db.delete(row._id);
   }
+  for (const row of await ctx.db.query("interest").take(WIPE_SCAN_LIMIT)) {
+    if (seededShiftIds.has(row.shiftId)) await ctx.db.delete(row._id);
+  }
   for (const shift of seededShifts) {
     await ctx.db.delete(shift._id);
   }
+  const seededProjectIds = new Set<string>();
   for (const row of await ctx.db.query("projects").take(WIPE_SCAN_LIMIT)) {
-    if (row.isSeed) await ctx.db.delete(row._id);
+    if (row.isSeed) {
+      seededProjectIds.add(row._id);
+      await ctx.db.delete(row._id);
+    }
   }
   for (const row of await ctx.db.query("volunteers").take(WIPE_SCAN_LIMIT)) {
     if (row.isSeed) await ctx.db.delete(row._id);
   }
-  // The whole ticker goes: a feed that outlives the shifts it references reads as broken.
+  // Demo activity goes (a feed that outlives the shifts it references reads as broken), but a
+  // REAL organizer's history stays: only simulated rows and rows about seeded shifts/projects.
   for (const row of await ctx.db.query("activity").take(WIPE_SCAN_LIMIT)) {
-    await ctx.db.delete(row._id);
+    const aboutSeed =
+      (row.shiftId !== undefined && seededShiftIds.has(row.shiftId)) ||
+      (row.projectId !== undefined && seededProjectIds.has(row.projectId));
+    if (row.isSim || aboutSeed) await ctx.db.delete(row._id);
   }
 }
 
@@ -764,9 +775,31 @@ export const rollForward = internalMutation({
         .withIndex("by_shift_kind_position", (q) => q.eq("shiftId", shift._id))
         .collect();
       for (const claim of claims) {
+        if (!claim.isSeed) {
+          // A real person signed up for the shift that just ENDED. Carrying their claim a day
+          // forward would silently book them onto a slot they never chose (and could overlap
+          // another commitment), so it is dropped rather than moved.
+          await ctx.db.delete(claim._id);
+          continue;
+        }
         await ctx.db.patch(claim._id, { startsAt, endsAt });
         claimsPatched++;
       }
+      // Counters are always recomputed from the index, never adjusted by arithmetic.
+      const spotsLeft = await ctx.db
+        .query("claims")
+        .withIndex("by_shift_kind_position", (q) => q.eq("shiftId", shift._id).eq("kind", "spot"))
+        .collect();
+      const waitingLeft = await ctx.db
+        .query("claims")
+        .withIndex("by_shift_kind_position", (q) =>
+          q.eq("shiftId", shift._id).eq("kind", "waitlist"),
+        )
+        .collect();
+      await ctx.db.patch(shift._id, {
+        filledCount: spotsLeft.length,
+        waitlistCount: waitingLeft.length,
+      });
       shiftsRolled++;
     }
 

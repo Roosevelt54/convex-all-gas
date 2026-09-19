@@ -1,7 +1,9 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { ConvexProvider, ConvexReactClient } from "convex/react";
+import { ConvexReactClient } from "convex/react";
+import { ConvexAuthProvider } from "@convex-dev/auth/react";
 import App from "./App";
+import { wantsFreshIdentity } from "./identity";
 
 const address = import.meta.env.VITE_CONVEX_URL as string | undefined;
 
@@ -17,11 +19,29 @@ if (!address) {
     "Run <code>npx convex dev</code> and rebuild.</p></div>";
 } else {
   const convex = new ConvexReactClient(address);
+
+  // Convex Auth keeps its tokens in localStorage by default, which every tab on this origin
+  // shares. The race-test window (#…?as=new) exists to be a DIFFERENT person on the same laptop,
+  // so it must not inherit the main window's login: it keeps its tokens in this tab's own
+  // sessionStorage under a separate namespace. It starts signed out, and signing in or out there
+  // never touches the main window's session.
+  const raceWindow = wantsFreshIdentity();
+
   createRoot(rootEl).render(
     <StrictMode>
-      <ConvexProvider client={convex}>
-        <App />
-      </ConvexProvider>
+      {raceWindow ? (
+        <ConvexAuthProvider
+          client={convex}
+          storage={window.sessionStorage}
+          storageNamespace="crewcall-race"
+        >
+          <App />
+        </ConvexAuthProvider>
+      ) : (
+        <ConvexAuthProvider client={convex}>
+          <App />
+        </ConvexAuthProvider>
+      )}
     </StrictMode>,
   );
 }

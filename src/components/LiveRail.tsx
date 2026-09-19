@@ -39,9 +39,20 @@ function clockTime(ts: number): string {
   });
 }
 
+/**
+ * The organizer-side kinds get a small text label so a new, opened or cancelled shift stands out
+ * in a feed of claims. The message itself is pre-rendered server-side and shown verbatim.
+ */
+const KIND_LABEL: Partial<Record<ActivityRow["kind"], { text: string; className: string }>> = {
+  posted: { text: "new shift", className: "badge" },
+  opened: { text: "now open", className: "badge badge--you" },
+  cancelled: { text: "cancelled", className: "badge badge--full" },
+};
+
 function ActivityItem(props: { row: ActivityRow; now: number }): JSX.Element {
   const { row, now } = props;
   const glyphStyle = { "--glyph-bg": accentVar(hashName(row.actorName)) } as CSSProperties;
+  const label = KIND_LABEL[row.kind];
   return (
     <li className="live__row">
       {/* Decorative: the actor's name is already inside the message text. */}
@@ -55,6 +66,7 @@ function ActivityItem(props: { row: ActivityRow; now: number }): JSX.Element {
             {relativePast(row.createdAt, now)}
             <span className="sr-only"> ({clockTime(row.createdAt)})</span>
           </time>{" "}
+          {label !== undefined ? <span className={label.className}>{label.text}</span> : null}{" "}
           {row.isSim ? <span className="badge badge--sim">sim</span> : null}
         </p>
       </div>

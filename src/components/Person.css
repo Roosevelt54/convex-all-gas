@@ -1,0 +1,30 @@
+.person {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  flex-wrap: wrap;
+}
+
+/* --success is >= 6.5:1 on --surface in both themes, so the mark reads as text, not decoration. */
+.person__verified {
+  color: var(--success);
+  font-weight: 750;
+}
+
+.person__guest,
+.person__you {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
+.countdown {
+  font-variant-numeric: tabular-nums;
+}
+
+.countdown__digits {
+  font-weight: 700;
+}
+
+.countdown--done {
+  color: var(--muted);
+}

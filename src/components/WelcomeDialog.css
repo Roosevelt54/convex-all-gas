@@ -1,0 +1,55 @@
+.welcome {
+  max-width: 30rem;
+}
+
+.welcome__field {
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.welcome__field > label {
+  font-weight: 650;
+  font-size: var(--fs-lg);
+}
+
+.welcome__field input {
+  width: 100%;
+  min-height: var(--tap);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.welcome__field input[aria-invalid="true"] {
+  border-color: var(--danger);
+  border-width: 2px;
+}
+
+.welcome__hint,
+.welcome__note {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.welcome__error {
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  color: var(--danger);
+}
+
+.welcome__actions {
+  display: grid;
+  gap: var(--sp-2);
+}
+
+@media (min-width: 480px) {
+  .welcome__actions {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .welcome__actions .btn--primary {
+    grid-column: 1 / -1;
+  }
+}

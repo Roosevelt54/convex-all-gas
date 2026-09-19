@@ -7,10 +7,11 @@ import {
   type JSX,
   type KeyboardEvent,
 } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { absoluteWindow, isoAttr, relativeStart, useEscape, useFocusTrap } from "../util";
+import { PersonName } from "./Person";
 
 /** Six accent tokens exist in styles.css; colorIndex is hash % 8, so fold it. */
 const ACCENT_COUNT = 6;
@@ -95,11 +96,27 @@ export default function YouPopover(props: {
   volunteer: { handle: string; glyph: string; colorIndex: number } | null;
   announce: (msg: string) => void;
   onClose: () => void;
+  onOpenAccount: () => void;
+  onSignOut: () => Promise<void>;
 }): JSX.Element {
-  const { deviceKey, now, volunteer, announce, onClose } = props;
+  const { deviceKey, now, volunteer, announce, onClose, onOpenAccount, onSignOut } = props;
 
   const trapRef = useFocusTrap(true);
   useEscape(onClose, true);
+
+  const me = useQuery(api.volunteers.me, { deviceKey });
+  const { isAuthenticated } = useConvexAuth();
+  const [signingOut, setSigningOut] = useState(false);
+
+  const signOutHere = useCallback(async () => {
+    if (signingOut) return;
+    setSigningOut(true);
+    try {
+      await onSignOut();
+    } finally {
+      setSigningOut(false);
+    }
+  }, [signingOut, onSignOut]);
 
   const mine = useQuery(api.board.myCommitments, { deviceKey });
   const rename = useMutation(api.volunteers.rename);
@@ -109,7 +126,7 @@ export default function YouPopover(props: {
   const [releasing, setReleasing] = useState<string | null>(null);
 
   /* ------------------------------------------------------ handle edit -- */
-  const liveHandle = mine?.volunteer?.handle ?? volunteer?.handle ?? "";
+  const liveHandle = me?.handle ?? mine?.volunteer?.handle ?? volunteer?.handle ?? "";
   const [draft, setDraft] = useState(liveHandle);
   const knownHandleRef = useRef(liveHandle);
 
@@ -205,8 +222,11 @@ export default function YouPopover(props: {
     );
   }, [spots, announce]);
 
-  const glyph = mine?.volunteer?.glyph ?? volunteer?.glyph ?? "";
-  const colorIndex = mine?.volunteer?.colorIndex ?? volunteer?.colorIndex ?? 0;
+  const glyph = me?.glyph ?? mine?.volunteer?.glyph ?? volunteer?.glyph ?? "";
+  const colorIndex = me?.colorIndex ?? mine?.volunteer?.colorIndex ?? volunteer?.colorIndex ?? 0;
+  const verified = me?.verified ?? false;
+  // Trust the server's view of the account once it has loaded; fall back to the client's.
+  const signedIn = me ? me.verified : isAuthenticated;
 
   return (
     <div className="backdrop">
@@ -234,6 +254,56 @@ export default function YouPopover(props: {
             {problem}
           </p>
         ) : null}
+
+        <section className="stack" aria-labelledby="you-account-heading">
+          <h3 id="you-account-heading">Your account</h3>
+          {me === undefined ? (
+            <p className="muted">Checking who you are…</p>
+          ) : signedIn ? (
+            <>
+              <p>
+                Signed in as{" "}
+                <PersonName handle={liveHandle} verified={verified} />
+                {me?.username ? <span className="muted"> · username {me.username}</span> : null}
+              </p>
+              <p className="muted">
+                The ✓ tells organizers it is really you. Your spots belong to your account, so they
+                follow you to any device you sign in on.
+              </p>
+              <p className="row">
+                <button
+                  type="button"
+                  className="btn btn--secondary btn--sm"
+                  aria-disabled={signingOut}
+                  onClick={() => void signOutHere()}
+                >
+                  Sign out
+                </button>
+                {signingOut ? <span className="muted">Signing you out…</span> : null}
+              </p>
+            </>
+          ) : (
+            <>
+              <p>
+                You are browsing as{" "}
+                <PersonName handle={liveHandle} verified={false} />
+              </p>
+              <p className="muted">
+                Guests can claim, waitlist and use “Notify me”. An account adds a ✓ next to your
+                name and lets you post shifts — just a username and password, no email.
+              </p>
+              <p className="row">
+                <button
+                  type="button"
+                  className="btn btn--secondary btn--sm"
+                  onClick={onOpenAccount}
+                >
+                  Sign in or create an account
+                </button>
+              </p>
+            </>
+          )}
+        </section>
 
         <section className="stack" aria-labelledby="you-name-heading">
           <h3 id="you-name-heading">Your display name</h3>
@@ -354,12 +424,20 @@ export default function YouPopover(props: {
 
         <section className="stack" aria-labelledby="you-about-heading">
           <h3 id="you-about-heading">About this identity</h3>
-          <p className="muted">
-            You are known to this board by a key stored in this browser only — no account, no
-            password, nothing sent anywhere else. It is a convenience for a neighbourhood board and
-            explicitly not a security boundary: a new browser is a new neighbour, and anyone using
-            this device can act as you.
-          </p>
+          {signedIn ? (
+            <p className="muted">
+              You are signed in with a username and password. Organizers see a ✓ next to your
+              name, which a guest cannot fake by typing the same name. Signing out turns this
+              browser back into a fresh guest; your spots stay with your account.
+            </p>
+          ) : (
+            <p className="muted">
+              As a guest you are known to this board by a key stored in this browser only — no
+              account, nothing sent anywhere else. It is a convenience, not proof of who you are: a
+              new browser is a new neighbour, and anyone can type any name. That is why guest names
+              show “(guest)” and account names show a ✓.
+            </p>
+          )}
         </section>
       </div>
     </div>

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, FocusEvent, JSX } from "react";
-import { useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
 import {
   absoluteWindow,
   isoAttr,
@@ -10,8 +11,11 @@ import {
   relativePast,
   relativeStart,
 } from "../util";
+import Countdown from "./Countdown";
 import Filters, { scoreNeed, type TimeWindow } from "./Filters";
 import LiveRail from "./LiveRail";
+import { PersonName } from "./Person";
+import "./Board.css";
 
 type Snapshot = FunctionReturnType<typeof api.board.snapshot>;
 type ShiftRow = Snapshot["shifts"][number];
@@ -23,6 +27,7 @@ type CommitmentRow = Commitments["claims"][number];
 const NO_SHIFTS: ShiftRow[] = [];
 const NO_PROJECTS: ProjectRow[] = [];
 const NO_CLAIMS: CommitmentRow[] = [];
+const NO_INTERESTS: Commitments["interests"] = [];
 
 const ACCENT_COUNT = 6;
 const HOUR = 3_600_000;
@@ -42,39 +47,113 @@ function clockTime(ts: number): string {
   });
 }
 
+/** "9:00 AM" when it is today, "Sat 9:00 AM" otherwise — for the note beside a locked button. */
+function openClock(ts: number, now: number): string {
+  const sameDay = new Date(ts).toDateString() === new Date(now).toDateString();
+  return new Date(ts).toLocaleString(
+    undefined,
+    sameDay
+      ? { hour: "numeric", minute: "2-digit" }
+      : { weekday: "short", hour: "numeric", minute: "2-digit" },
+  );
+}
+
 function endOfToday(now: number): number {
   const d = new Date(now);
   d.setHours(23, 59, 59, 999);
   return d.getTime();
 }
 
-/** Human phrase for the causal-attribution chip. `null` means "never touched by a person". */
-function changePhrase(kind: ShiftRow["lastChangeKind"]): string | null {
-  switch (kind) {
+/** The causal-attribution chip: who (or what) last changed this shift. */
+function attributionText(shift: ShiftRow): string {
+  const who = shift.lastChangeActorName;
+  switch (shift.lastChangeKind) {
     case "claimed":
-      return "took a spot";
+      return `${who} took a spot`;
     case "released":
-      return "released a spot";
+      return `${who} released a spot`;
     case "promoted":
-      return "was promoted";
+      return `${who} was promoted`;
     case "waitlisted":
-      return "joined the waitlist";
+      return `${who} joined the waitlist`;
     case "capacity_added":
-      return "opened more spots";
+      return `${who} opened more spots`;
+    case "posted":
+      return `${who} posted this`;
+    case "opened":
+      return "Opened for claims";
+    case "cancelled":
+      return `Cancelled by ${who}`;
     case "seeded":
-      return null;
+      return "Posted to the board";
   }
 }
 
 /**
  * Urgency ordering. The rule is "spots remaining ascending, then soonest start" — but a
  * shift with zero spots remaining needs nobody, so full and cancelled shifts sort BELOW
- * every shift that still needs people rather than above them.
+ * every shift that still needs people rather than above them. Scheduled shifts cannot be
+ * claimed yet, so they sit after every open shift that needs people (ordered by opensAt in
+ * compareShifts) and before full ones. Cancelled stay last.
  */
 function sortRank(shift: ShiftRow): number {
   if (shift.status === "cancelled") return 1_000_000;
   const spotsLeft = Math.max(0, shift.capacity - shift.filledCount);
-  return spotsLeft === 0 ? 100_000 : spotsLeft;
+  if (spotsLeft === 0) return 100_000;
+  if (shift.status === "scheduled") return 50_000;
+  return spotsLeft;
+}
+
+function compareShifts(a: ShiftRow, b: ShiftRow): number {
+  const ra = sortRank(a);
+  const rb = sortRank(b);
+  if (ra !== rb) return ra - rb;
+  if (a.status === "scheduled" && b.status === "scheduled") {
+    const oa = a.opensAt ?? a.startsAt;
+    const ob = b.opensAt ?? b.startsAt;
+    if (oa !== ob) return oa - ob;
+  }
+  if (a.startsAt !== b.startsAt) return a.startsAt - b.startsAt;
+  return a._id < b._id ? -1 : a._id > b._id ? 1 : 0; // deterministic tiebreak
+}
+
+/** A ConvexError surfaces as err.data = {code, message}. Never show a stack trace. */
+function errorMessage(err: unknown): string {
+  const data = (err as { data?: unknown } | null | undefined)?.data;
+  if (data && typeof data === "object" && "message" in data) {
+    const message = (data as { message?: unknown }).message;
+    if (typeof message === "string" && message.length > 0) return message;
+  }
+  return "Something went wrong. Try that again in a moment.";
+}
+
+/**
+ * Ask for browser-notification permission without ever blocking the tap on it. Older Safari
+ * returns undefined instead of a promise, which the try/catch absorbs.
+ */
+function requestNotifyPermission(): void {
+  try {
+    if (!("Notification" in window)) return;
+    if (Notification.permission !== "default") return;
+    void Notification.requestPermission().catch(() => undefined);
+  } catch {
+    /* unsupported — the in-app alert still works */
+  }
+}
+
+/** Outline bell when off, filled bell when on: a shape cue, not only the pressed colour. */
+function BellIcon(props: { filled: boolean }): JSX.Element {
+  return (
+    <svg className="notify__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M12 3a6 6 0 0 0-6 6v3.6L4.3 15.4A1 1 0 0 0 5.2 17h13.6a1 1 0 0 0 .9-1.6L18 12.6V9a6 6 0 0 0-6-6Zm-2.4 15.5a2.5 2.5 0 0 0 4.8 0Z"
+        fill={props.filled ? "currentColor" : "none"}
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 function sameOrder(a: readonly string[], b: readonly string[]): boolean {
@@ -107,16 +186,25 @@ function ShiftCard(props: {
   shift: ShiftRow;
   project: ProjectRow | undefined;
   claim: CommitmentRow | undefined;
+  interested: boolean;
+  interestError: string | null;
   now: number;
   moved: boolean;
   onOpen: (shiftId: string) => void;
+  onToggleInterest: (shift: ShiftRow) => void;
 }): JSX.Element {
-  const { shift, project, claim, now, moved, onOpen } = props;
+  const { shift, project, claim, interested, interestError, now, moved, onOpen, onToggleInterest } =
+    props;
 
   const spotsLeft = Math.max(0, shift.capacity - shift.filledCount);
   const cancelled = shift.status === "cancelled";
+  const opensAt = shift.status === "scheduled" ? shift.opensAt : null;
+  const scheduled = opensAt !== null;
   const full = !cancelled && spotsLeft === 0;
   const projectTitle = project?.title ?? "Community project";
+  // Only real (non-seed) projects carry an organizer, and organizing requires an account.
+  const postedBy =
+    project !== undefined && !project.isSeed && project.organizerName ? project.organizerName : null;
 
   // The accent stripe is decorative reinforcement; the project name is always text.
   const cardStyle = { "--shift-accent": accentVar(project?.accentIndex ?? 0) } as CSSProperties;
@@ -136,9 +224,15 @@ function ShiftCard(props: {
       ? shift.waitlistCount > 0
         ? `Full · ${shift.waitlistCount} waiting`
         : "Full"
-      : `${spotsLeft} left`;
+      : scheduled
+        ? `${spotsLeft} ${plural(spotsLeft, "spot", "spots")}`
+        : `${spotsLeft} left`;
   const capacityBadgeClass =
-    cancelled || full ? "badge badge--full" : spotsLeft <= 2 ? "badge badge--urgent" : "badge";
+    cancelled || full
+      ? "badge badge--full"
+      : !scheduled && spotsLeft <= 2
+        ? "badge badge--urgent"
+        : "badge";
 
   const timingBadge = shift.startsAt - now <= SOON_MS ? whenRelative : null;
 
@@ -148,7 +242,11 @@ function ShiftCard(props: {
       : `Waitlist #${claim.waitlistRank ?? claim.position + 1}`
     : null;
 
-  const phrase = changePhrase(shift.lastChangeKind);
+  const attribution = attributionText(shift);
+
+  // A scheduled shift cannot be claimed yet (the server returns "not_open"), but the button
+  // still opens the sheet so people can read the details before it unlocks.
+  const claimLocked = scheduled && !claim;
 
   const claimVerb = cancelled
     ? "Claim a spot"
@@ -160,6 +258,10 @@ function ShiftCard(props: {
 
   const headingId = `shift-${shift._id}-title`;
   const cancelNoteId = `shift-${shift._id}-cancelled`;
+  const opensNoteId = `shift-${shift._id}-opens`;
+  const waitingId = `shift-${shift._id}-waiting`;
+  const interestErrorId = `shift-${shift._id}-interest-error`;
+  const waiting = shift.interestCount;
 
   return (
     <li>
@@ -175,13 +277,34 @@ function ShiftCard(props: {
               {shift.title}
             </h3>
             <p className="shift__project">{projectTitle}</p>
+            {postedBy !== null ? (
+              <p className="shift__posted">
+                Posted by <PersonName handle={postedBy} verified />
+              </p>
+            ) : null}
           </div>
           <div className="row">
+            {opensAt !== null ? (
+              <span className="badge badge--opens">
+                <Countdown to={opensAt} label="Opens in" />
+              </span>
+            ) : null}
             <span className={capacityBadgeClass}>{capacityBadge}</span>
             {timingBadge ? <span className="badge badge--urgent">{timingBadge}</span> : null}
             {youBadge ? <span className="badge badge--you">{youBadge}</span> : null}
           </div>
         </div>
+
+        {opensAt !== null ? (
+          <div className="shift__opens">
+            <time className="shift__opens-at" dateTime={isoAttr(opensAt)}>
+              Opens {clockTime(opensAt)}
+            </time>
+            <span className="tnum" id={waitingId}>
+              {waiting} {plural(waiting, "neighbour", "neighbours")} waiting
+            </span>
+          </div>
+        ) : null}
 
         <p className="shift__meta">
           {/* Relative time is never the only information: the absolute window is right there. */}
@@ -215,7 +338,7 @@ function ShiftCard(props: {
         </div>
 
         <p className="attribution">
-          <span>{phrase ? `${shift.lastChangeActorName} ${phrase} ` : "Posted to the board "}</span>
+          <span>{attribution} </span>
           <time dateTime={isoAttr(shift.lastChangeAt)}>
             {relativePast(shift.lastChangeAt, now)}
             <span className="sr-only"> ({clockTime(shift.lastChangeAt)})</span>
@@ -230,8 +353,8 @@ function ShiftCard(props: {
             type="button"
             className="btn btn--primary"
             data-card-focus=""
-            aria-disabled={cancelled ? true : undefined}
-            aria-describedby={cancelled ? cancelNoteId : undefined}
+            aria-disabled={cancelled || claimLocked ? true : undefined}
+            aria-describedby={cancelled ? cancelNoteId : claimLocked ? opensNoteId : undefined}
             onClick={cancelled ? undefined : () => onOpen(shift._id)}
           >
             {claimVerb}
@@ -240,6 +363,30 @@ function ShiftCard(props: {
               at {shift.title}, {projectTitle}, {whenAbsolute}, {meterText}
             </span>
           </button>
+
+          {claimLocked && opensAt !== null ? (
+            <span className="shift__note" id={opensNoteId}>
+              Opens at {openClock(opensAt, now)}
+              <span className="sr-only">
+                . Claiming unlocks then; the button shows the details now.
+              </span>
+            </span>
+          ) : null}
+
+          {scheduled ? (
+            <button
+              type="button"
+              className="btn btn--secondary btn--sm"
+              data-notify=""
+              aria-pressed={interested}
+              aria-describedby={interestError !== null ? `${waitingId} ${interestErrorId}` : waitingId}
+              onClick={() => onToggleInterest(shift)}
+            >
+              <BellIcon filled={interested} />
+              Notify me
+              <span className="sr-only"> when {shift.title} opens</span>
+            </button>
+          ) : null}
 
           <button type="button" className="btn btn--ghost btn--sm" onClick={() => onOpen(shift._id)}>
             Details
@@ -252,6 +399,12 @@ function ShiftCard(props: {
           {cancelled ? (
             <span className="muted" id={cancelNoteId}>
               This shift was cancelled, so it cannot be claimed.
+            </span>
+          ) : null}
+
+          {interestError !== null ? (
+            <span className="shift__error" id={interestErrorId}>
+              {interestError}
             </span>
           ) : null}
         </div>
@@ -278,6 +431,95 @@ export default function Board(props: {
   const shifts = snapshot?.shifts ?? NO_SHIFTS;
   const projects = snapshot?.projects ?? NO_PROJECTS;
   const claims = mine?.claims ?? NO_CLAIMS;
+  const interests = mine?.interests ?? NO_INTERESTS;
+  const opensSoonCount = snapshot?.stats.opensSoonCount ?? 0;
+
+  // Optimistic so the bell and the waiting count flip on tap; the server reconciles both.
+  const toggleInterestBase = useMutation(api.shifts.toggleInterest);
+  const toggleInterest = useMemo(
+    () =>
+      toggleInterestBase.withOptimisticUpdate((store, args) => {
+        const current = store.getQuery(api.board.myCommitments, { deviceKey: args.deviceKey });
+        if (current === undefined) return;
+        const was = current.interests.includes(args.shiftId);
+        store.setQuery(
+          api.board.myCommitments,
+          { deviceKey: args.deviceKey },
+          {
+            ...current,
+            interests: was
+              ? current.interests.filter((id) => id !== args.shiftId)
+              : [...current.interests, args.shiftId],
+          },
+        );
+        const snap = store.getQuery(api.board.snapshot, {});
+        if (snap === undefined) return;
+        store.setQuery(
+          api.board.snapshot,
+          {},
+          {
+            ...snap,
+            shifts: snap.shifts.map((s) =>
+              s._id === args.shiftId
+                ? { ...s, interestCount: Math.max(0, s.interestCount + (was ? -1 : 1)) }
+                : s,
+            ),
+          },
+        );
+      }),
+    [toggleInterestBase],
+  );
+
+  const interestSet = useMemo(() => new Set<string>(interests), [interests]);
+  const [interestError, setInterestError] = useState<{ shiftId: string; message: string } | null>(
+    null,
+  );
+  const inFlightRef = useRef<ReadonlySet<string>>(new Set());
+  const askedPermissionRef = useRef(false);
+
+  const onToggleInterest = useCallback(
+    async (shift: ShiftRow) => {
+      const shiftId: Id<"shifts"> = shift._id;
+      if (inFlightRef.current.has(shiftId)) return;
+      const turningOn = !interestSet.has(shiftId);
+      if (turningOn && !askedPermissionRef.current) {
+        askedPermissionRef.current = true;
+        requestNotifyPermission(); // fire-and-forget: never blocks the toggle
+      }
+      if (!deviceKey) {
+        const message = "Still connecting to the board. Try again in a moment.";
+        setInterestError({ shiftId, message });
+        announce(message);
+        return;
+      }
+      inFlightRef.current = new Set([...inFlightRef.current, shiftId]);
+      setInterestError(null);
+      try {
+        const result = await toggleInterest({ deviceKey, shiftId });
+        announce(
+          result.interested
+            ? "We'll tell you when it opens."
+            : `Okay, no alert for ${shift.title}.`,
+        );
+      } catch (err) {
+        const message = errorMessage(err);
+        setInterestError({ shiftId, message });
+        announce(message);
+      } finally {
+        const next = new Set(inFlightRef.current);
+        next.delete(shiftId);
+        inFlightRef.current = next;
+      }
+    },
+    [deviceKey, interestSet, toggleInterest, announce],
+  );
+
+  const onToggleInterestClick = useCallback(
+    (shift: ShiftRow) => {
+      void onToggleInterest(shift);
+    },
+    [onToggleInterest],
+  );
 
   // "This week" by default: the widest window, so the board is never empty on first paint.
   const [timeWindow, setTimeWindow] = useState<TimeWindow>("week");
@@ -321,19 +563,14 @@ export default function Board(props: {
       if (s.endsAt <= now) return false;
       if (s.startsAt > horizon) return false;
       if (selectedSkills.length > 0 && !selectedSkills.includes(s.skillTag)) return false;
-      if (needsPeopleOnly && (s.status !== "open" || s.capacity - s.filledCount <= 0)) {
+      // Scheduled shifts still need people — they just cannot be claimed yet — so they stay.
+      if (needsPeopleOnly && (s.status === "cancelled" || s.capacity - s.filledCount <= 0)) {
         return false;
       }
       return true;
     });
 
-    list.sort((a, b) => {
-      const ra = sortRank(a);
-      const rb = sortRank(b);
-      if (ra !== rb) return ra - rb;
-      if (a.startsAt !== b.startsAt) return a.startsAt - b.startsAt;
-      return a._id < b._id ? -1 : a._id > b._id ? 1 : 0; // deterministic tiebreak
-    });
+    list.sort(compareShifts);
     return list;
   }, [shifts, now, timeWindow, selectedSkills, needsPeopleOnly]);
 
@@ -506,6 +743,20 @@ export default function Board(props: {
     }
     const spotsLeft = Math.max(0, best.capacity - best.filledCount);
     const projectTitle = projectsById.get(best.projectId)?.title ?? "a community project";
+
+    // scoreNeed only picks a scheduled shift when no open shift needs anyone.
+    if (best.status === "scheduled") {
+      listRef.current
+        ?.querySelector<HTMLElement>(`[data-shift-id="${best._id}"] [data-notify]`)
+        ?.focus();
+      const opens = best.opensAt ?? best.startsAt;
+      announce(
+        `Every open shift is covered. Next to open: ${best.title} at ${projectTitle}, ` +
+          `opens ${clockTime(opens)}. Focus is on its Notify me button.`,
+      );
+      return;
+    }
+
     const node = listRef.current?.querySelector<HTMLElement>(
       `[data-shift-id="${best._id}"] [data-card-focus]`,
     );
@@ -541,9 +792,9 @@ export default function Board(props: {
 
       <main className="col" aria-label="Shift board">
         <div className="stack">
-          <div className="row">
+          <div className="board__head">
             <h2 className="fieldset__legend" id="shift-list-heading" ref={headingRef} tabIndex={-1}>
-              Open shifts
+              Shifts
             </h2>
             <span className="muted tnum">
               {loading
@@ -554,6 +805,9 @@ export default function Board(props: {
                     "shifts",
                   )}, most urgent first`}
             </span>
+            {opensSoonCount > 0 ? (
+              <span className="badge badge--opens tnum">Opening soon ({opensSoonCount})</span>
+            ) : null}
           </div>
 
           {pendingCount > 0 ? (
@@ -600,9 +854,16 @@ export default function Board(props: {
                   shift={shift}
                   project={projectsById.get(shift.projectId)}
                   claim={claimsByShift.get(shift._id)}
+                  interested={interestSet.has(shift._id)}
+                  interestError={
+                    interestError !== null && interestError.shiftId === shift._id
+                      ? interestError.message
+                      : null
+                  }
                   now={now}
                   moved={movedIds.includes(shift._id)}
                   onOpen={onOpenShift}
+                  onToggleInterest={onToggleInterestClick}
                 />
               ))}
             </ul>
