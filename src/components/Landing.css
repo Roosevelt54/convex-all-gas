@@ -38,16 +38,16 @@
 /* The rotating 3D field. Sits behind the words, never over them. */
 .lp__backdrop {
   position: absolute;
-  top: -90px;
+  top: -120px;
   left: 50%;
   transform: translateX(-50%);
-  width: 150vw;
+  width: min(980px, 116vw);
   max-width: none;
-  height: calc(100% + 130px);
+  height: calc(100% + 170px);
   z-index: 0;
   pointer-events: none;
-  opacity: 0.62;
-  mask-image: radial-gradient(closest-side, #000 55%, transparent 100%);
+  opacity: 0.8;
+  mask-image: radial-gradient(closest-side, #000 72%, transparent 100%);
 }
 .lp__hero > *:not(.lp__backdrop) { position: relative; z-index: 1; }
 .lp__hero h1 {
