@@ -1,72 +1,106 @@
 import { useEffect, useRef } from "react";
 
 /**
- * The Crewcall mark as a genuinely 3D object: a thick extruded "C" that turns a full 360 on its
- * vertical axis, so you see the front face, then the depth of its side wall, then the back.
+ * The actual Crewcall mark, extruded into a solid and turned a full 360.
  *
- * Built by hand — the ring is extruded into quads, each quad is lit by its own normal, and the
- * quads are painted back-to-front. No 3D library, nothing extra to download.
+ * The mark is the rounded blue square from the masthead (.wordmark__mark): a squircle badge
+ * carrying a large light dot and a smaller one to its right — the "call going out". Here it is a
+ * real slab with thickness, so the turn shows its face, then its edge, then its back.
+ *
+ * Built by hand: the outline is extruded into wall quads, faces and dots are drawn as polygons on
+ * the face planes, and everything is painted back-to-front. No 3D library.
  */
 type V = { x: number; y: number; z: number };
-type Quad = { v: [V, V, V, V]; n: V; tone: number };
+type Face = { pts: V[]; n: V; color: [number, number, number]; tone: number };
 
-const GAP_START = -0.62; // radians: where the C opens
-const GAP_END = 0.62;
-const R_OUT = 1;
-const R_IN = 0.56;
-const DEPTH = 0.46; // the "good thickness" — front face to back face
-const SEGMENTS = 64;
+const HALF = 1; // half the badge's width
+const CORNER = 0.42; // corner radius, matching the 7px radius on a 26px mark
+const DEPTH = 0.52; // the slab's thickness
+const BLUE: [number, number, number] = [143, 180, 255]; // --accent-0
+const LIGHT: [number, number, number] = [244, 244, 242]; // --text, the dots
 
-/** Build the extruded ring once: front face, back face, outer and inner walls, and the two caps. */
-function buildMark(): Quad[] {
-  const quads: Quad[] = [];
+/** The badge outline: a rounded square, walked anticlockwise. */
+function outline(): { x: number; y: number }[] {
+  const pts: { x: number; y: number }[] = [];
+  const k = HALF - CORNER;
+  const corners: [number, number, number][] = [
+    [k, k, 0], // centre x, centre y, start angle quadrant
+    [-k, k, Math.PI / 2],
+    [-k, -k, Math.PI],
+    [k, -k, -Math.PI / 2],
+  ];
+  for (const [cx, cy, a0] of corners) {
+    for (let i = 0; i <= 8; i++) {
+      const a = a0 + (i / 8) * (Math.PI / 2);
+      pts.push({ x: cx + Math.cos(a) * CORNER, y: cy + Math.sin(a) * CORNER });
+    }
+  }
+  return pts;
+}
+
+/** A dot on a face plane, as a polygon. */
+function disc(cx: number, cy: number, r: number, z: number): V[] {
+  const pts: V[] = [];
+  for (let i = 0; i < 28; i++) {
+    const a = (i / 28) * Math.PI * 2;
+    pts.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r, z });
+  }
+  return pts;
+}
+
+function buildMark(): Face[] {
+  const faces: Face[] = [];
+  const ring = outline();
   const zF = -DEPTH / 2;
   const zB = DEPTH / 2;
-  const span = Math.PI * 2 - (GAP_END - GAP_START);
-  const at = (i: number) => GAP_END + (i / SEGMENTS) * span;
-  const p = (ang: number, r: number, z: number): V => ({ x: Math.cos(ang) * r, y: Math.sin(ang) * r, z });
 
-  for (let i = 0; i < SEGMENTS; i++) {
-    const a0 = at(i);
-    const a1 = at(i + 1);
-    const mid = (a0 + a1) / 2;
+  // Front and back of the badge.
+  faces.push({
+    pts: ring.map((p) => ({ x: p.x, y: p.y, z: zF })),
+    n: { x: 0, y: 0, z: -1 },
+    color: BLUE,
+    tone: 1,
+  });
+  faces.push({
+    pts: ring.map((p) => ({ x: p.x, y: p.y, z: zB })).reverse(),
+    n: { x: 0, y: 0, z: 1 },
+    color: BLUE,
+    tone: 0.86,
+  });
 
-    // Front and back faces. Their normals point straight out along z.
-    quads.push({
-      v: [p(a0, R_IN, zF), p(a0, R_OUT, zF), p(a1, R_OUT, zF), p(a1, R_IN, zF)],
-      n: { x: 0, y: 0, z: -1 },
-      tone: 1,
-    });
-    quads.push({
-      v: [p(a0, R_IN, zB), p(a1, R_IN, zB), p(a1, R_OUT, zB), p(a0, R_OUT, zB)],
-      n: { x: 0, y: 0, z: 1 },
-      tone: 0.82,
-    });
-    // Outer wall — this is the band you see as the mark turns edge-on.
-    quads.push({
-      v: [p(a0, R_OUT, zF), p(a0, R_OUT, zB), p(a1, R_OUT, zB), p(a1, R_OUT, zF)],
-      n: { x: Math.cos(mid), y: Math.sin(mid), z: 0 },
-      tone: 0.94,
-    });
-    // Inner wall, normal pointing back at the hole's centre.
-    quads.push({
-      v: [p(a0, R_IN, zF), p(a1, R_IN, zF), p(a1, R_IN, zB), p(a0, R_IN, zB)],
-      n: { x: -Math.cos(mid), y: -Math.sin(mid), z: 0 },
-      tone: 0.66,
+  // The side wall: one quad per outline segment, each lit by its own outward normal.
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i];
+    const b = ring[(i + 1) % ring.length];
+    const ex = b.x - a.x;
+    const ey = b.y - a.y;
+    const len = Math.hypot(ex, ey) || 1;
+    faces.push({
+      pts: [
+        { x: a.x, y: a.y, z: zF },
+        { x: a.x, y: a.y, z: zB },
+        { x: b.x, y: b.y, z: zB },
+        { x: b.x, y: b.y, z: zF },
+      ],
+      n: { x: ey / len, y: -ex / len, z: 0 },
+      color: BLUE,
+      tone: 0.9,
     });
   }
 
-  // The two flat ends of the C.
-  for (const [ang, sign] of [
-    [GAP_END, 1],
-    [GAP_START, -1],
+  // The two dots, on both faces, lifted a hair off the surface so they always paint on top.
+  const lift = 0.004;
+  for (const [z, n, tone] of [
+    [zF - lift, { x: 0, y: 0, z: -1 }, 1],
+    [zB + lift, { x: 0, y: 0, z: 1 }, 0.86],
   ] as const) {
-    const n = { x: -Math.sin(ang) * sign, y: Math.cos(ang) * sign, z: 0 };
-    const face: [V, V, V, V] = [p(ang, R_IN, zF), p(ang, R_OUT, zF), p(ang, R_OUT, zB), p(ang, R_IN, zB)];
-    quads.push({ v: sign === 1 ? face : ([...face].reverse() as [V, V, V, V]), n, tone: 0.75 });
+    const big = disc(-0.12, 0, 0.30, z);
+    const small = disc(0.42, 0, 0.19, z);
+    faces.push({ pts: n.z < 0 ? big : [...big].reverse(), n, color: LIGHT, tone });
+    faces.push({ pts: n.z < 0 ? small : [...small].reverse(), n, color: LIGHT, tone });
   }
 
-  return quads;
+  return faces;
 }
 
 export default function LandingBackdrop() {
@@ -78,7 +112,7 @@ export default function LandingBackdrop() {
     if (!canvas || !ctx) return;
 
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const quads = buildMark();
+    const faces = buildMark();
     const light = { x: -0.45, y: -0.62, z: -0.65 };
 
     let raf = 0;
@@ -98,13 +132,13 @@ export default function LandingBackdrop() {
 
     const frame = (t: number) => {
       // A full turn roughly every 11 seconds: readable, never frantic.
-      const spin = reduced.matches ? 0.9 : (t / 11000) * Math.PI * 2;
-      const tilt = -0.22; // a slight lean so the top face catches the light
+      const spin = reduced.matches ? 0.7 : (t / 11000) * Math.PI * 2;
+      const tilt = -0.2; // a slight lean so the top edge catches the light
       const cosA = Math.cos(spin);
       const sinA = Math.sin(spin);
       const cosB = Math.cos(tilt);
       const sinB = Math.sin(tilt);
-      const R = Math.min(w, h) * 0.22;
+      const R = Math.min(w, h) * 0.24;
       const cx = w / 2;
       const cy = h * 0.5;
 
@@ -118,36 +152,34 @@ export default function LandingBackdrop() {
         return { x: x1, y: y1, z: z2 };
       };
       const project = (v: V) => {
-        const scale = 3.4 / (3.4 + v.z);
+        const scale = 3.6 / (3.6 + v.z);
         return { sx: cx + v.x * R * scale, sy: cy + v.y * R * scale };
       };
 
-      // Transform, drop the faces pointing away, then paint far ones first.
       const drawable = [];
-      for (const q of quads) {
-        const n = rotate(q.n);
-        if (n.z > 0.02) continue; // back-facing
-        const v = q.v.map(rotate) as [V, V, V, V];
-        const depth = (v[0].z + v[1].z + v[2].z + v[3].z) / 4;
+      for (const f of faces) {
+        const n = rotate(f.n);
+        if (n.z > 0.02) continue; // pointing away from the camera
+        const pts = f.pts.map(rotate);
+        let depth = 0;
+        for (const p of pts) depth += p.z;
+        depth /= pts.length;
         const lam = Math.max(0, -(n.x * light.x + n.y * light.y + n.z * light.z));
-        drawable.push({ v, depth, shade: q.tone * (0.28 + lam * 0.85) });
+        drawable.push({ pts, depth, color: f.color, shade: f.tone * (0.55 + lam * 0.6) });
       }
       drawable.sort((a, b) => b.depth - a.depth);
 
       for (const f of drawable) {
-        const pts = f.v.map(project);
+        const pts = f.pts.map(project);
         const level = Math.min(1, f.shade);
-        // The mark's own blue, lit: dark in shadow, near-white on the face that faces the light.
-        const r = Math.round(30 + level * 130);
-        const g = Math.round(52 + level * 140);
-        const b = Math.round(96 + level * 150);
-        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        const [r, g, b] = f.color;
+        ctx.fillStyle = `rgb(${Math.round(r * level)},${Math.round(g * level)},${Math.round(b * level)})`;
         ctx.beginPath();
         ctx.moveTo(pts[0].sx, pts[0].sy);
         for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].sx, pts[i].sy);
         ctx.closePath();
         ctx.fill();
-        // Hairline of the same colour closes the seams between adjacent quads.
+        // A hairline of the same colour closes the seams between adjacent quads.
         ctx.strokeStyle = ctx.fillStyle;
         ctx.lineWidth = 1;
         ctx.stroke();
