@@ -901,3 +901,44 @@ select {
     scroll-behavior: auto !important;
   }
 }
+
+/* Community switcher + invite link */
+.community-bar {
+  border-bottom: 1px solid var(--line, rgba(127, 127, 127, 0.25));
+  padding: 8px 16px;
+}
+.community-bar__inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  max-width: 1280px;
+  margin: 0 auto;
+}
+.community-bar__pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.community-bar select,
+.community-bar input {
+  font: inherit;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.4));
+  background: transparent;
+  color: inherit;
+  max-width: 100%;
+}
+.community-bar select option {
+  color: #111;
+}
+.community-bar__link {
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+.community-bar__note {
+  max-width: 1280px;
+  margin: 8px auto 0;
+}

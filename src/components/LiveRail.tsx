@@ -1,3 +1,4 @@
+import { useScopeArgs } from "../community";
 import { useState } from "react";
 import type { CSSProperties, JSX } from "react";
 import { usePaginatedQuery, useQuery } from "convex/react";
@@ -76,10 +77,11 @@ function ActivityItem(props: { row: ActivityRow; now: number }): JSX.Element {
 
 function ActivityDrawer(props: { now: number; onClose: () => void }): JSX.Element {
   const { now, onClose } = props;
+  const scopeArgs = useScopeArgs();
   // Paginated so the drawer can show the whole history without unbounding the ticker.
   const { results, status, loadMore } = usePaginatedQuery(
     api.activity.page,
-    {},
+    scopeArgs,
     { initialNumItems: 30 },
   );
   const trapRef = useFocusTrap(true);
@@ -142,7 +144,7 @@ function ActivityDrawer(props: { now: number; onClose: () => void }): JSX.Elemen
 export default function LiveRail(props: { now: number }): JSX.Element {
   const { now } = props;
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const rows = useQuery(api.activity.recent, {});
+  const rows = useQuery(api.activity.recent, useScopeArgs());
 
   return (
     <aside className="card" id="live-activity" aria-label="Live activity" tabIndex={-1}>

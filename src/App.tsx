@@ -20,6 +20,8 @@ import {
   usePersistentFlag,
 } from "./util";
 import Board from "./components/Board";
+import CommunityBar from "./components/CommunityBar";
+import { presenceScope, useCommunityId, useScopeArgs } from "./community";
 import ShiftSheet from "./components/ShiftSheet";
 import Wall from "./components/Wall";
 import Organize from "./components/Organize";
@@ -151,9 +153,14 @@ export default function App(): JSX.Element {
   const volunteer = me ?? ensured;
 
   const mine = useQuery(api.board.myCommitments, { deviceKey });
-  const snapshot = useQuery(api.board.snapshot, {});
+  const scopeArgs = useScopeArgs();
+  const communityId = useCommunityId();
+  const snapshot = useQuery(api.board.snapshot, scopeArgs);
   const demo = useQuery(api.meta.demoState, {});
-  const presence = useQuery(api.presence.onScope, { scope: "board" });
+  const presence = useQuery(api.presence.onScope, {
+    scope: presenceScope("board", communityId),
+    deviceKey,
+  });
 
   const setPulse = useMutation(api.meta.setPulse);
   const ping = useMutation(api.presence.ping);
@@ -185,7 +192,7 @@ export default function App(): JSX.Element {
   }, [effectiveTheme]);
 
   /* ----------------------------------------------------------- presence -- */
-  const scope = route.name === "wall" ? "wall" : "board";
+  const scope = presenceScope(route.name === "wall" ? "wall" : "board", communityId);
 
   useEffect(() => {
     // ping returns silently when the volunteer row is not there yet, so wait for the
@@ -563,6 +570,8 @@ export default function App(): JSX.Element {
           </div>
         </div>
       </header>
+
+      <CommunityBar deviceKey={deviceKey} route={route} navigate={navigate} identityReady={identityReady} />
 
       {alertMessage ? (
         <p className="notice notice--warn" role="alert">

@@ -63,7 +63,9 @@ export const ping = mutation({
     const volunteer = await resolveVolunteer(ctx, args.deviceKey);
     if (!volunteer) return null;
     // Outsiders never show up as "here now" in a private community.
-    if (!(await mayUseScope(ctx, scope, args.deviceKey))) return null;
+    // An unknown scope (e.g. the first ping racing the seed) is a silent no-op, not an error.
+    const allowed = await mayUseScope(ctx, scope, args.deviceKey).catch(() => false);
+    if (!allowed) return null;
 
     const existing = await ctx.db
       .query("presence")

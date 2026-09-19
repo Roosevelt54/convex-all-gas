@@ -1,3 +1,4 @@
+import { getCommunityId } from "../community";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties, FormEvent, JSX, KeyboardEvent, RefObject } from "react";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
@@ -686,7 +687,9 @@ function NewProjectForm(props: {
     }
     setBusy(true);
     try {
-      const projectId = await create(value);
+      // Posted into the community you're currently in (the public demo when none is picked).
+      const communityId = getCommunityId() as Id<"communities"> | undefined;
+      const projectId = await create(communityId ? { ...value, communityId } : value);
       setDraft(EMPTY_PROJECT);
       setErrors({});
       props.announce(`Created project ${value.title}. Next, post its first shift.`);

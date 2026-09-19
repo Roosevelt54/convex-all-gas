@@ -1,3 +1,4 @@
+import { presenceScope, useCommunityId, useScopeArgs } from "../community";
 import type { CSSProperties, JSX } from "react";
 import { useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
@@ -40,9 +41,14 @@ function spotsLeft(s: ShiftRow): number {
  * App already sends the wall-scoped presence heartbeat, so none is sent here.
  */
 export default function Wall({ now }: { deviceKey: string; now: number }): JSX.Element {
-  const snapshot = useQuery(api.board.snapshot, {});
-  const activity = useQuery(api.activity.recent, {});
-  const presence = useQuery(api.presence.onScope, { scope: "wall" });
+  const scopeArgs = useScopeArgs();
+  const communityId = useCommunityId();
+  const snapshot = useQuery(api.board.snapshot, scopeArgs);
+  const activity = useQuery(api.activity.recent, scopeArgs);
+  const presence = useQuery(api.presence.onScope, {
+    scope: presenceScope("wall", communityId),
+    deviceKey: scopeArgs.deviceKey,
+  });
 
   const backHref = "#/";
 

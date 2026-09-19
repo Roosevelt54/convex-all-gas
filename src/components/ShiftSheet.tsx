@@ -1,3 +1,4 @@
+import { useScopeArgs } from "../community";
 import {
   useCallback,
   useEffect,
@@ -140,6 +141,7 @@ export default function ShiftSheet(props: {
   onClose: () => void;
   onOpenAccount: () => void;
 }): JSX.Element {
+  const snapArgs = useScopeArgs();
   const { shiftId, deviceKey, now, announce, onClose, onOpenAccount } = props;
   const { isAuthenticated } = useConvexAuth();
 
@@ -166,7 +168,7 @@ export default function ShiftSheet(props: {
   const claim = useMutation(api.shifts.claim).withOptimisticUpdate((localStore, args) => {
     const stamp = Date.now();
 
-    const snap = localStore.getQuery(api.board.snapshot, {});
+    const snap = localStore.getQuery(api.board.snapshot, snapArgs);
     if (snap) {
       let consumed = false;
       const shifts = snap.shifts.map((s) => {
@@ -183,7 +185,7 @@ export default function ShiftSheet(props: {
       });
       localStore.setQuery(
         api.board.snapshot,
-        {},
+        snapArgs,
         {
           ...snap,
           shifts,
@@ -250,11 +252,11 @@ export default function ShiftSheet(props: {
     if (!local || !local.shift || !mine) return;
 
     if (mine.kind === "spot") {
-      const snap = localStore.getQuery(api.board.snapshot, {});
+      const snap = localStore.getQuery(api.board.snapshot, snapArgs);
       if (snap) {
         localStore.setQuery(
           api.board.snapshot,
-          {},
+          snapArgs,
           {
             ...snap,
             shifts: snap.shifts.map((s) =>
@@ -330,11 +332,11 @@ export default function ShiftSheet(props: {
         );
       }
 
-      const snap = localStore.getQuery(api.board.snapshot, {});
+      const snap = localStore.getQuery(api.board.snapshot, snapArgs);
       if (snap) {
         localStore.setQuery(
           api.board.snapshot,
-          {},
+          snapArgs,
           {
             ...snap,
             shifts: snap.shifts.map((s) =>

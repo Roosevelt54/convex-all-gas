@@ -1,3 +1,4 @@
+import { useScopeArgs } from "../community";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, FocusEvent, JSX } from "react";
 import { useMutation, useQuery } from "convex/react";
@@ -422,10 +423,11 @@ export default function Board(props: {
   onOpenShift: (shiftId: string) => void;
 }): JSX.Element {
   const { deviceKey, now, announce, onOpenShift } = props;
+  const snapArgs = useScopeArgs();
 
   // TWO separate subscriptions, deliberately. "You" state costs one small query and never
   // widens the board read; both are live subscriptions, so nothing here ever polls.
-  const snapshot = useQuery(api.board.snapshot, {});
+  const snapshot = useQuery(api.board.snapshot, snapArgs);
   const mine = useQuery(api.board.myCommitments, deviceKey ? { deviceKey } : "skip");
 
   const shifts = snapshot?.shifts ?? NO_SHIFTS;
@@ -452,11 +454,11 @@ export default function Board(props: {
               : [...current.interests, args.shiftId],
           },
         );
-        const snap = store.getQuery(api.board.snapshot, {});
+        const snap = store.getQuery(api.board.snapshot, snapArgs);
         if (snap === undefined) return;
         store.setQuery(
           api.board.snapshot,
-          {},
+          snapArgs,
           {
             ...snap,
             shifts: snap.shifts.map((s) =>

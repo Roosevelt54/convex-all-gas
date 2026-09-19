@@ -77,13 +77,19 @@ export type Route =
   | { name: "board" }
   | { name: "shift"; shiftId: string }
   | { name: "wall" }
-  | { name: "organize" };
+  | { name: "organize" }
+  | { name: "join"; code: string }
+  | { name: "community"; communityId: string };
 
 export function parseHash(hash: string): Route {
   const q = hash.indexOf("?");
   const path = (q === -1 ? hash : hash.slice(0, q)).replace(/^#/, "");
   if (path === "/wall") return { name: "wall" };
   if (path === "/organize") return { name: "organize" };
+  const j = path.match(/^\/join\/([^/]+)$/);
+  if (j) return { name: "join", code: decodeURIComponent(j[1]) };
+  const c = path.match(/^\/c\/([^/]+)$/);
+  if (c) return { name: "community", communityId: decodeURIComponent(c[1]) };
   const m = path.match(/^\/shift\/([^/]+)$/);
   if (m) return { name: "shift", shiftId: decodeURIComponent(m[1]) };
   return { name: "board" };
