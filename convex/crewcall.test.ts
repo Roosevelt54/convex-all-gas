@@ -27,7 +27,24 @@ function newT() {
 }
 
 async function makeUser(t: T, username: string, name?: string): Promise<Id<"users">> {
-  return await t.run(async (ctx) => ctx.db.insert("users", { email: username, name: name ?? username }));
+  return await t.run(async (ctx) => {
+    // Projects default to the public demo community, which the seed normally creates.
+    const demo = await ctx.db
+      .query("communities")
+      .withIndex("by_seed", (q) => q.eq("isSeed", true))
+      .first();
+    if (!demo) {
+      await ctx.db.insert("communities", {
+        name: "Demo",
+        description: "",
+        joinCode: "publicdemo",
+        isPublic: true,
+        isSeed: true,
+        createdAt: Date.now(),
+      });
+    }
+    return await ctx.db.insert("users", { email: username, name: name ?? username });
+  });
 }
 
 function signedIn(t: T, userId: Id<"users">) {
@@ -633,5 +650,42 @@ describe("7. review fixes", () => {
     const rows = await t.run(async (ctx) => ctx.db.query("activity").take(400));
     expect(rows.some((r) => !r.isSim)).toBe(true);
     expect(rows.filter((r) => r.isSim).length).toBeLessThan(305);
+  });
+});
+
+describe("8. communities", () => {
+  test("a private community is invisible and unclaimable until you open its invite link", async () => {
+    const t = newT();
+    const alice = await makeUser(t, "alice", "Alice");
+    const asAlice = signedIn(t, alice);
+    const { communityId, joinCode } = await asAlice.mutation(api.communities.create, {
+      name: "Elm Street Mutual Aid",
+      description: "",
+    });
+    const projectId = await asAlice.mutation(api.organize.createProject, { ...projectArgs, communityId });
+    const shiftId = await asAlice.mutation(api.organize.createShift, shiftArgs(projectId));
+
+    const DK = "outsider-device-01";
+    await t.mutation(api.volunteers.ensure, { deviceKey: DK });
+
+    const locked = await t.query(api.board.snapshot, { communityId, deviceKey: DK });
+    expect(locked.access).toBe("locked");
+    expect(locked.shifts).toHaveLength(0);
+    expect((await t.query(api.shifts.detail, { shiftId, deviceKey: DK })).access).toBe("locked");
+    expect(await t.query(api.activity.recent, { communityId, deviceKey: DK })).toHaveLength(0);
+    await expectCode(t.mutation(api.shifts.claim, { deviceKey: DK, shiftId }), "NOT_MEMBER");
+
+    const demo = await t.query(api.board.snapshot, {});
+    expect(demo.shifts.find((s) => s._id === shiftId)).toBeUndefined();
+
+    await t.mutation(api.communities.join, { deviceKey: DK, joinCode });
+    const open = await t.query(api.board.snapshot, { communityId, deviceKey: DK });
+    expect(open.access).toBe("ok");
+    expect(open.shifts.map((s) => s._id)).toContain(shiftId);
+    const res = await t.mutation(api.shifts.claim, { deviceKey: DK, shiftId });
+    expect(res.outcome).toBe("claimed");
+
+    const view = await t.query(api.communities.get, { communityId, deviceKey: DK });
+    expect(view).toMatchObject({ isMember: true, canView: true, joinCode: null });
   });
 });

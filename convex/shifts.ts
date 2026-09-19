@@ -10,9 +10,12 @@ import {
   lowestFreePosition,
   readSpotClaims,
   readWaitlist,
+  canAccessCommunity,
+  requireShiftAccess,
   requireVolunteer,
   resolveVolunteer,
   touchShift,
+  usernameOf,
 } from "./lib";
 
 /** Bound on how many "Notify me" rows are counted per shift. */
@@ -33,6 +36,8 @@ const rosterEntry = v.object({
   isYou: v.boolean(),
   isSeed: v.boolean(),
   verified: v.boolean(),
+  // The account username behind a verified name, so two "Sam"s are never confused.
+  username: v.union(v.string(), v.null()),
 });
 
 type RosterEntry = {
@@ -43,6 +48,7 @@ type RosterEntry = {
   isYou: boolean;
   isSeed: boolean;
   verified: boolean;
+  username: string | null;
 };
 
 const waitlistEntry = v.object({
@@ -55,6 +61,8 @@ const waitlistEntry = v.object({
   isYou: v.boolean(),
   isSeed: v.boolean(),
   verified: v.boolean(),
+  // The account username behind a verified name, so two "Sam"s are never confused.
+  username: v.union(v.string(), v.null()),
 });
 
 type WaitlistEntry = {
@@ -67,6 +75,7 @@ type WaitlistEntry = {
   isYou: boolean;
   isSeed: boolean;
   verified: boolean;
+  username: string | null;
 };
 
 const yourClaimValidator = v.object({
@@ -85,6 +94,7 @@ type YourClaim = {
 
 /** A shift that vanished mid-navigation must paint an empty sheet, never throw. */
 const emptyDetail = {
+  access: "missing" as "missing" | "locked",
   shift: null,
   project: null,
   roster: [] as RosterEntry[],
@@ -113,8 +123,12 @@ const emptyDetail = {
  * shape.
  */
 export const detail = query({
-  args: { shiftId: v.id("shifts"), deviceKey: v.string() },
+  // A string, not v.id: it comes straight from the URL hash, and a mangled link must paint the
+  // empty sheet rather than throw.
+  args: { shiftId: v.string(), deviceKey: v.string() },
   returns: v.object({
+    // "locked": the shift is in a private community you haven't joined; nothing else is returned.
+    access: v.union(v.literal("ok"), v.literal("locked"), v.literal("missing")),
     shift: v.union(schema.doc("shifts"), v.null()),
     project: v.union(schema.doc("projects"), v.null()),
     roster: v.array(rosterEntry),
@@ -126,15 +140,23 @@ export const detail = query({
     canOrganize: v.boolean(),
   }),
   handler: async (ctx, args) => {
-    const shift = await ctx.db.get(args.shiftId);
-    if (!shift) return emptyDetail;
-
-    const project = await ctx.db.get(shift.projectId);
+    const shiftId = ctx.db.normalizeId("shifts", args.shiftId);
+    const shift = shiftId ? await ctx.db.get(shiftId) : null;
+    if (!shiftId || !shift) return emptyDetail;
 
     // Signed in → the account's row; signed out → the device's guest row. An unknown device is
     // a race with volunteers.ensure, not an error.
     const volunteer = await resolveVolunteer(ctx, args.deviceKey);
     const youId: Id<"volunteers"> | null = volunteer?._id ?? null;
+
+    if (shift.communityId !== undefined) {
+      const community = await ctx.db.get(shift.communityId);
+      if (!(await canAccessCommunity(ctx, community, volunteer))) {
+        return { ...emptyDetail, access: "locked" as const };
+      }
+    }
+
+    const project = await ctx.db.get(shift.projectId);
 
     const userId = await getAuthUserId(ctx);
     const canOrganize =
@@ -145,7 +167,7 @@ export const detail = query({
       const interest = await ctx.db
         .query("interest")
         .withIndex("by_shift_volunteer", (q) =>
-          q.eq("shiftId", args.shiftId).eq("volunteerId", youId),
+          q.eq("shiftId", shiftId).eq("volunteerId", youId),
         )
         .unique();
       youAreInterested = interest !== null;
@@ -155,12 +177,12 @@ export const detail = query({
     // because those helpers are typed for MutationCtx.
     const spots = await ctx.db
       .query("claims")
-      .withIndex("by_shift_kind_position", (q) => q.eq("shiftId", args.shiftId).eq("kind", "spot"))
+      .withIndex("by_shift_kind_position", (q) => q.eq("shiftId", shiftId).eq("kind", "spot"))
       .collect();
     const waitlistRows = await ctx.db
       .query("claims")
       .withIndex("by_shift_kind_position", (q) =>
-        q.eq("shiftId", args.shiftId).eq("kind", "waitlist"),
+        q.eq("shiftId", shiftId).eq("kind", "waitlist"),
       )
       .collect();
 
@@ -176,6 +198,7 @@ export const detail = query({
         isYou: youId !== null && claim.volunteerId === youId,
         isSeed: claim.isSeed,
         verified: holder?.userId !== undefined && holder !== null,
+        username: await usernameOf(ctx, holder),
       });
     }
     roster.sort((a, b) => a.position - b.position);
@@ -201,6 +224,7 @@ export const detail = query({
         isYou: youId !== null && claim.volunteerId === youId,
         isSeed: claim.isSeed,
         verified: holder?.userId !== undefined && holder !== null,
+        username: await usernameOf(ctx, holder),
       });
     }
 
@@ -225,11 +249,12 @@ export const detail = query({
 
     const activity = await ctx.db
       .query("activity")
-      .withIndex("by_shift_created", (q) => q.eq("shiftId", args.shiftId))
+      .withIndex("by_shift_created", (q) => q.eq("shiftId", shiftId))
       .order("desc")
       .take(DETAIL_ACTIVITY_LIMIT);
 
     return {
+      access: "ok" as const,
       shift,
       project,
       roster,
@@ -303,6 +328,8 @@ export const claim = mutation({
   returns: claimResultValidator,
   handler: async (ctx, args) => {
     const volunteer = await requireVolunteer(ctx, args.deviceKey);
+    const shift = await ctx.db.get(args.shiftId);
+    if (shift) await requireShiftAccess(ctx, shift, volunteer);
     return await applyClaim(ctx, {
       volunteerId: volunteer._id,
       handle: volunteer.handle,
@@ -485,6 +512,10 @@ export const toggleInterest = mutation({
     const shift = await ctx.db.get(args.shiftId);
     if (!shift) {
       throw new ConvexError({ code: "GONE", message: "That shift is no longer available." });
+    }
+    await requireShiftAccess(ctx, shift, volunteer);
+    if (shift.status === "cancelled") {
+      throw new ConvexError({ code: "CANCELLED", message: "That shift was cancelled." });
     }
     if (shift.status !== "scheduled") {
       throw new ConvexError({ code: "BAD_INPUT", message: "That shift is already open." });

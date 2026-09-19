@@ -11,6 +11,7 @@
 import type * as activity from "../activity.js";
 import type * as auth from "../auth.js";
 import type * as board from "../board.js";
+import type * as communities from "../communities.js";
 import type * as crons from "../crons.js";
 import type * as http from "../http.js";
 import type * as lib from "../lib.js";
@@ -32,6 +33,7 @@ declare const fullApi: ApiFromModules<{
   activity: typeof activity;
   auth: typeof auth;
   board: typeof board;
+  communities: typeof communities;
   crons: typeof crons;
   http: typeof http;
   lib: typeof lib;

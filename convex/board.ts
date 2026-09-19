@@ -2,7 +2,14 @@ import { v } from "convex/values";
 import { query } from "./_generated/server";
 import { Doc, Id } from "./_generated/dataModel";
 import { changeKindValidator, shiftStatusValidator } from "./schema";
-import { OVERLAP_LOOKBACK_MS, WINDOW_BACK_MS, WINDOW_FWD_MS, resolveVolunteer } from "./lib";
+import {
+  OVERLAP_LOOKBACK_MS,
+  WINDOW_BACK_MS,
+  WINDOW_FWD_MS,
+  canAccessCommunity,
+  resolveCommunity,
+  resolveVolunteer,
+} from "./lib";
 
 /** A shift is "critical" when it has <= 2 spots left AND starts inside this horizon. */
 const CRITICAL_HORIZON_MS = 48 * 3600_000;
@@ -86,10 +93,26 @@ type SnapshotShift = {
  * client, which re-renders from a ticking clock — a Convex query does not re-run just because
  * wall-clock time passed. Filters are client-side over these <= 60 rows.
  */
+const emptyStats = {
+  shiftCount: 0,
+  spotsLeftTotal: 0,
+  criticalCount: 0,
+  fullCount: 0,
+  projectCount: 0,
+  opensSoonCount: 0,
+};
+
 export const snapshot = query({
-  args: {},
+  // communityId omitted = the public demo community. deviceKey identifies a signed-out member.
+  args: { communityId: v.optional(v.string()), deviceKey: v.optional(v.string()) },
   returns: v.object({
     generatedAt: v.number(),
+    community: v.union(
+      v.object({ _id: v.id("communities"), name: v.string(), isPublic: v.boolean() }),
+      v.null(),
+    ),
+    // "locked": a private community you haven't joined. "missing": no such community.
+    access: v.union(v.literal("ok"), v.literal("locked"), v.literal("missing")),
     projects: v.array(snapshotProject),
     shifts: v.array(snapshotShift),
     stats: v.object({
@@ -101,16 +124,31 @@ export const snapshot = query({
       opensSoonCount: v.number(),
     }),
   }),
-  handler: async (ctx) => {
+  handler: async (ctx, args) => {
     const now = Date.now();
 
-    // Reading Date.now() to build an index RANGE is fine; deriving a boolean from it is not.
+    const community = await resolveCommunity(ctx, args.communityId);
+    if (!community) {
+      return { generatedAt: now, community: null, access: "missing" as const, projects: [], shifts: [], stats: emptyStats };
+    }
+    const summary = { _id: community._id, name: community.name, isPublic: community.isPublic };
+    const volunteer = args.deviceKey === undefined ? null : await resolveVolunteer(ctx, args.deviceKey);
+    if (!(await canAccessCommunity(ctx, community, volunteer))) {
+      // Nothing about a private community's shifts leaves the server for an outsider.
+      return { generatedAt: now, community: summary, access: "locked" as const, projects: [], shifts: [], stats: emptyStats };
+    }
+
+    // One community's own shifts only. Reading Date.now() to build an index RANGE is fine;
+    // deriving a boolean from it is not.
+    const communityId = community._id;
     const rows = await ctx.db
       .query("shifts")
-      .withIndex("by_start", (q) =>
-        q.gte("startsAt", now - WINDOW_BACK_MS).lte("startsAt", now + WINDOW_FWD_MS),
+      .withIndex("by_community_start", (q) =>
+        q
+          .eq("communityId", communityId)
+          .gte("startsAt", now - WINDOW_BACK_MS)
+          .lte("startsAt", now + WINDOW_FWD_MS),
       )
-      // Headroom for the ~30 demo shifts plus several organizers at their 20-shift cap.
       .take(100);
 
     const shifts: SnapshotShift[] = rows.map((s) => ({
@@ -177,6 +215,8 @@ export const snapshot = query({
 
     return {
       generatedAt: now,
+      community: summary,
+      access: "ok" as const,
       projects,
       shifts,
       stats: {
@@ -205,6 +245,7 @@ const commitmentRow = v.object({
   meetPoint: v.string(),
   capacity: v.number(),
   filledCount: v.number(),
+  status: shiftStatusValidator,
   overlapsWithClaimId: v.optional(v.string()),
 });
 
@@ -222,6 +263,7 @@ type CommitmentRow = {
   meetPoint: string;
   capacity: number;
   filledCount: number;
+  status: Doc<"shifts">["status"];
   overlapsWithClaimId?: string;
 };
 
@@ -317,6 +359,7 @@ export const myCommitments = query({
         meetPoint: shift.meetPoint,
         capacity: shift.capacity,
         filledCount: shift.filledCount,
+        status: shift.status,
       });
     }
 

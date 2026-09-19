@@ -1,10 +1,8 @@
 import { ConvexError, v } from "convex/values";
-import { internalMutation, mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query, QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { isClientDeviceKey, resolveVolunteer } from "./lib";
-
-/** A Convex document id rendered as a string is always this long. */
-const ID_LENGTH = 32;
+import { Doc } from "./_generated/dataModel";
+import { canAccessCommunity, isClientDeviceKey, resolveCommunity, resolveVolunteer } from "./lib";
 /** presence.ping is a 15s heartbeat; don't let it schedule a pulse kick more often than this. */
 const PULSE_KICK_MIN_GAP_MS = 10_000;
 /** A row whose last heartbeat is older than this is swept to isActive: false. */
@@ -13,9 +11,35 @@ const SWEEP_BATCH = 100;
 const SCOPE_TAKE = 24;
 const PEOPLE_SHOWN = 8;
 
-function validateScope(scope: string): string {
-  if (scope === "board" || scope === "wall" || scope.length === ID_LENGTH) return scope;
+/**
+ * Scopes: "board" / "wall" (the demo community), "board:<communityId>" / "wall:<communityId>",
+ * or a shift id. Returns the community the scope belongs to (undefined for a pre-community shift),
+ * or throws on anything unrecognized — so presence can't be used to probe arbitrary strings.
+ */
+async function scopeCommunity(
+  ctx: QueryCtx,
+  scope: string,
+): Promise<Doc<"communities"> | null | undefined> {
+  const m = /^(board|wall)(?::(.+))?$/.exec(scope);
+  if (m) {
+    const community = await resolveCommunity(ctx, m[2]);
+    if (community) return community;
+  } else {
+    const shiftId = ctx.db.normalizeId("shifts", scope);
+    const shift = shiftId ? await ctx.db.get(shiftId) : null;
+    if (shift) {
+      return shift.communityId === undefined ? undefined : await ctx.db.get(shift.communityId);
+    }
+  }
   throw new ConvexError({ code: "BAD_INPUT", message: "Unknown presence scope." });
+}
+
+/** Whether this caller may see / appear in a scope's "N here now". */
+async function mayUseScope(ctx: QueryCtx, scope: string, deviceKey: string | undefined) {
+  const community = await scopeCommunity(ctx, scope);
+  if (community === undefined) return true;
+  const volunteer = deviceKey === undefined ? null : await resolveVolunteer(ctx, deviceKey);
+  return await canAccessCommunity(ctx, community, volunteer);
 }
 
 /**
@@ -30,7 +54,7 @@ export const ping = mutation({
   args: { deviceKey: v.string(), scope: v.string() },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const scope = validateScope(args.scope);
+    const scope = args.scope;
     const now = Date.now();
 
     // Reserved server-minted keys never reach presence; a signed-in caller resolves to their
@@ -38,6 +62,8 @@ export const ping = mutation({
     if (!isClientDeviceKey(args.deviceKey)) return null;
     const volunteer = await resolveVolunteer(ctx, args.deviceKey);
     if (!volunteer) return null;
+    // Outsiders never show up as "here now" in a private community.
+    if (!(await mayUseScope(ctx, scope, args.deviceKey))) return null;
 
     const existing = await ctx.db
       .query("presence")
@@ -107,12 +133,19 @@ export const leave = mutation({
  * zero on an idle deployment.
  */
 export const onScope = query({
-  args: { scope: v.string() },
+  args: { scope: v.string(), deviceKey: v.optional(v.string()) },
   returns: v.object({
     count: v.number(),
     people: v.array(v.object({ handle: v.string(), glyph: v.string(), colorIndex: v.number() })),
   }),
   handler: async (ctx, args) => {
+    let allowed = false;
+    try {
+      allowed = await mayUseScope(ctx, args.scope, args.deviceKey);
+    } catch {
+      // A stale or mangled scope reads as an empty room, never an error on the page.
+    }
+    if (!allowed) return { count: 0, people: [] };
     const rows = await ctx.db
       .query("presence")
       .withIndex("by_scope_active", (q) => q.eq("scope", args.scope).eq("isActive", true))

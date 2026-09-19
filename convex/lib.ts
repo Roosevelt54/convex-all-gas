@@ -59,14 +59,26 @@ export function initials(handle: string): string {
   return (parts[0][0] + parts[1][0]).toUpperCase();
 }
 
+/** The name system events are attributed to. No person may take it. */
+export const SYSTEM_ACTOR = "Crewcall";
+
 export function sanitizeHandle(raw: string): string {
-  // Strip control characters and collapse whitespace; newlines must never reach the UI.
-  const cleaned = raw.replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim();
+  // Strip control characters and collapse whitespace; newlines must never reach the UI. Check
+  // marks are stripped too: the ✓ belongs to verified accounts, so a typed one would let a guest
+  // look verified in the feed.
+  const cleaned = raw
+    .replace(/[\x00-\x1f\x7f]/g, " ")
+    .replace(/[✓✔☑✅⍻√]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
   if (cleaned.length === 0 || cleaned.length > 24) {
     throw new ConvexError({
       code: "BAD_INPUT",
       message: "Pick a name between 1 and 24 characters.",
     });
+  }
+  if (cleaned.toLowerCase() === SYSTEM_ACTOR.toLowerCase()) {
+    throw new ConvexError({ code: "BAD_INPUT", message: "That name is reserved. Pick another." });
   }
   return cleaned;
 }
@@ -194,9 +206,91 @@ export async function logActivity(
     actorName: string;
     message: string;
     isSim: boolean;
+    communityId?: Id<"communities">;
   },
 ) {
-  await ctx.db.insert("activity", { ...args, createdAt: Date.now() });
+  // Every row is filed under its community, so one community's feed never shows another's news.
+  let communityId = args.communityId;
+  if (communityId === undefined && args.shiftId !== undefined) {
+    communityId = (await ctx.db.get(args.shiftId))?.communityId;
+  }
+  if (communityId === undefined && args.projectId !== undefined) {
+    communityId = (await ctx.db.get(args.projectId))?.communityId;
+  }
+  await ctx.db.insert("activity", {
+    ...args,
+    ...(communityId === undefined ? {} : { communityId }),
+    createdAt: Date.now(),
+  });
+}
+
+/* ------------------------------------------------------------------ communities -- */
+
+/** The one public community: the seeded demo board every visitor lands on. */
+export async function demoCommunity(ctx: QueryCtx | MutationCtx): Promise<Doc<"communities"> | null> {
+  return await ctx.db
+    .query("communities")
+    .withIndex("by_seed", (q) => q.eq("isSeed", true))
+    .first();
+}
+
+/** A community from a client-supplied id string; absent = the demo. Malformed ids → null. */
+export async function resolveCommunity(
+  ctx: QueryCtx | MutationCtx,
+  communityId: string | undefined,
+): Promise<Doc<"communities"> | null> {
+  if (communityId === undefined) return await demoCommunity(ctx);
+  const id = ctx.db.normalizeId("communities", communityId);
+  return id ? await ctx.db.get(id) : null;
+}
+
+/**
+ * THE COMMUNITY ACCESS RULE, used by every read and write that touches a community's shifts:
+ * public (the demo), or you organize it, or you joined it through its invite link.
+ */
+export async function canAccessCommunity(
+  ctx: QueryCtx | MutationCtx,
+  community: Doc<"communities"> | null,
+  volunteer: Doc<"volunteers"> | null,
+): Promise<boolean> {
+  if (!community) return false;
+  if (community.isPublic) return true;
+  const userId = await getAuthUserId(ctx);
+  if (userId !== null && community.organizerId === userId) return true;
+  if (!volunteer) return false;
+  const membership = await ctx.db
+    .query("memberships")
+    .withIndex("by_community_volunteer", (q) =>
+      q.eq("communityId", community._id).eq("volunteerId", volunteer._id),
+    )
+    .unique();
+  return membership !== null;
+}
+
+/** For mutations on a shift: refuse anyone outside its community. Shifts with no community
+ * (pre-community data) stay open, as they were. */
+export async function requireShiftAccess(
+  ctx: MutationCtx,
+  shift: Doc<"shifts">,
+  volunteer: Doc<"volunteers">,
+): Promise<void> {
+  if (shift.communityId === undefined) return;
+  const community = await ctx.db.get(shift.communityId);
+  if (!(await canAccessCommunity(ctx, community, volunteer))) {
+    throw new ConvexError({
+      code: "NOT_MEMBER",
+      message: "This shift belongs to a private community. Ask its organizer for the invite link.",
+    });
+  }
+}
+
+/** The username behind an account-owned volunteer row (the Password account id), else null. */
+export async function usernameOf(
+  ctx: QueryCtx | MutationCtx,
+  volunteer: Doc<"volunteers"> | null,
+): Promise<string | null> {
+  if (!volunteer || volunteer.userId === undefined) return null;
+  return (await ctx.db.get(volunteer.userId))?.email ?? null;
 }
 
 export async function touchShift(

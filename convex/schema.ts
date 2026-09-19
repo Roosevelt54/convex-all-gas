@@ -23,6 +23,33 @@ export const changeKindValidator = v.union(
 export default defineSchema({
   ...authTables,
 
+  // A community's own space. Only the public demo is visible to everyone; every other community
+  // is visible only to its organizer and to people who opened its join link.
+  communities: defineTable({
+    name: v.string(),
+    description: v.string(),
+    // The secret in the invite link (#/join/<joinCode>). Unguessable; it grants membership.
+    joinCode: v.string(),
+    isPublic: v.boolean(),
+    isSeed: v.boolean(),
+    // Absent only on the seeded demo community.
+    organizerId: v.optional(v.id("users")),
+    organizerName: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_join_code", ["joinCode"])
+    .index("by_organizer", ["organizerId"])
+    .index("by_seed", ["isSeed"]),
+
+  memberships: defineTable({
+    communityId: v.id("communities"),
+    volunteerId: v.id("volunteers"),
+    joinedAt: v.number(),
+  })
+    .index("by_community_volunteer", ["communityId", "volunteerId"])
+    .index("by_volunteer", ["volunteerId"])
+    .index("by_community", ["communityId"]),
+
   projects: defineTable({
     slug: v.string(),
     title: v.string(),
@@ -36,6 +63,7 @@ export default defineSchema({
     // Absent on seeded demo projects, which keep their public demo controls.
     organizerId: v.optional(v.id("users")),
     organizerName: v.optional(v.string()),
+    communityId: v.optional(v.id("communities")),
   })
     .index("by_slug", ["slug"])
     .index("by_organizer", ["organizerId"]),
@@ -71,7 +99,10 @@ export default defineSchema({
     // Last non-sim write. The pulse must not touch a shift within 90s of this.
     lastHumanTouchAt: v.number(),
     isSeed: v.boolean(),
+    // Denormalized from the project so a community's board is one indexed range read.
+    communityId: v.optional(v.id("communities")),
   })
+    .index("by_community_start", ["communityId", "startsAt"])
     .index("by_project_start", ["projectId", "startsAt"])
     .index("by_start", ["startsAt"])
     .index("by_status_start", ["status", "startsAt"])
@@ -154,7 +185,10 @@ export default defineSchema({
     message: v.string(),
     isSim: v.boolean(),
     createdAt: v.number(),
+    // Each community's feed is its own; one community never sees another's activity.
+    communityId: v.optional(v.id("communities")),
   })
+    .index("by_community_created", ["communityId", "createdAt"])
     .index("by_created", ["createdAt"])
     .index("by_shift_created", ["shiftId", "createdAt"])
     // Lets the watchdog prune simulated rows only; real organizer history is never pruned.

@@ -35,6 +35,74 @@ function toSelf(row: Doc<"volunteers">) {
   };
 }
 
+const MERGE_LIMIT = 50;
+
+/**
+ * Signing in on a device that already has an account row elsewhere: whatever this device did as
+ * a guest (communities joined, spots claimed, "Notify me" taps) moves onto the account, so an
+ * invite link opened before signing in is never lost. Rows the account already has are left on
+ * the guest row rather than duplicated. Moving a claim only re-points volunteerId, so shift
+ * counters are unchanged.
+ */
+async function mergeGuestInto(ctx: MutationCtx, deviceKey: string, account: Doc<"volunteers">) {
+  const guest = await ctx.db
+    .query("volunteers")
+    .withIndex("by_device_key", (q) => q.eq("deviceKey", deviceKey))
+    .unique();
+  if (!guest || guest.userId !== undefined || guest.isSeed || guest._id === account._id) return;
+
+  for (const m of await ctx.db
+    .query("memberships")
+    .withIndex("by_volunteer", (q) => q.eq("volunteerId", guest._id))
+    .take(MERGE_LIMIT)) {
+    const dup = await ctx.db
+      .query("memberships")
+      .withIndex("by_community_volunteer", (q) =>
+        q.eq("communityId", m.communityId).eq("volunteerId", account._id),
+      )
+      .unique();
+    if (dup) await ctx.db.delete(m._id);
+    else await ctx.db.patch(m._id, { volunteerId: account._id });
+  }
+
+  for (const c of await ctx.db
+    .query("claims")
+    .withIndex("by_volunteer_starts", (q) => q.eq("volunteerId", guest._id))
+    .take(MERGE_LIMIT)) {
+    const dup = await ctx.db
+      .query("claims")
+      .withIndex("by_shift_volunteer", (q) =>
+        q.eq("shiftId", c.shiftId).eq("volunteerId", account._id),
+      )
+      .first();
+    if (!dup) await ctx.db.patch(c._id, { volunteerId: account._id });
+  }
+
+  for (const i of await ctx.db
+    .query("interest")
+    .withIndex("by_volunteer", (q) => q.eq("volunteerId", guest._id))
+    .take(MERGE_LIMIT)) {
+    const dup = await ctx.db
+      .query("interest")
+      .withIndex("by_shift_volunteer", (q) =>
+        q.eq("shiftId", i.shiftId).eq("volunteerId", account._id),
+      )
+      .unique();
+    if (!dup) {
+      await ctx.db.patch(i._id, { volunteerId: account._id });
+      continue;
+    }
+    await ctx.db.delete(i._id);
+    const count = (
+      await ctx.db
+        .query("interest")
+        .withIndex("by_shift", (q) => q.eq("shiftId", i.shiftId))
+        .take(500)
+    ).length;
+    await ctx.db.patch(i.shiftId, { interestCount: count });
+  }
+}
+
 async function accountVolunteer(
   ctx: MutationCtx,
   deviceKey: string,
@@ -46,6 +114,7 @@ async function accountVolunteer(
     .withIndex("by_user", (q) => q.eq("userId", userId))
     .unique();
   if (mine) {
+    await mergeGuestInto(ctx, deviceKey, mine);
     await ctx.db.patch(mine._id, { lastSeenAt: now });
     return { ...mine, lastSeenAt: now };
   }
@@ -169,6 +238,22 @@ export const rename = mutation({
     const handle = sanitizeHandle(args.handle);
     const glyph = initials(handle);
     await ctx.db.patch(volunteer._id, { handle, glyph, nameChosen: true });
+    // "Posted by <name>" follows the organizer's current name.
+    const userId = volunteer.userId;
+    if (userId !== undefined) {
+      for (const p of await ctx.db
+        .query("projects")
+        .withIndex("by_organizer", (q) => q.eq("organizerId", userId))
+        .take(100)) {
+        await ctx.db.patch(p._id, { organizerName: handle });
+      }
+      for (const c of await ctx.db
+        .query("communities")
+        .withIndex("by_organizer", (q) => q.eq("organizerId", userId))
+        .take(10)) {
+        await ctx.db.patch(c._id, { organizerName: handle });
+      }
+    }
     return { handle, glyph };
   },
 });

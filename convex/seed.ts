@@ -9,7 +9,7 @@ import type { ActivityKind, ChangeKind } from "./lib";
  * Bump this to force a reseed on the next ensure(). Idempotence is keyed on it, so an
  * unchanged version plus at least one shift means ensure() is a no-op.
  */
-const SEED_VERSION = 5;
+const SEED_VERSION = 6;
 
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
@@ -303,8 +303,29 @@ type FeedRow = {
   message: string;
 };
 
+/**
+ * The one public community every visitor lands on. Kept (never wiped) across reseeds so its id —
+ * and any link to it — stays stable.
+ */
+async function ensureDemoCommunity(ctx: MutationCtx, now: number): Promise<Id<"communities">> {
+  const existing = await ctx.db
+    .query("communities")
+    .withIndex("by_seed", (q) => q.eq("isSeed", true))
+    .first();
+  if (existing) return existing._id;
+  return await ctx.db.insert("communities", {
+    name: "Riverside Commons (demo)",
+    description: "A public demo neighbourhood. Anyone can look around and take a shift.",
+    joinCode: "publicdemo",
+    isPublic: true,
+    isSeed: true,
+    createdAt: now,
+  });
+}
+
 async function writeDataset(ctx: MutationCtx): Promise<SeedStats> {
   const now = Date.now();
+  const communityId = await ensureDemoCommunity(ctx, now);
   const rng = mulberry32(hashString(`crewcall:seed:v${SEED_VERSION}`));
 
   // Today's three slots start on the next whole hour at least 75 minutes out, so nothing lands in
@@ -359,6 +380,7 @@ async function writeDataset(ctx: MutationCtx): Promise<SeedStats> {
         tags: p.tags,
         isSeed: true,
         createdAt: now - 45 * DAY,
+        communityId,
       }),
     );
   }
@@ -423,6 +445,7 @@ async function writeDataset(ctx: MutationCtx): Promise<SeedStats> {
       lastChangeIsSim: true,
       lastHumanTouchAt: 0, // nobody human has touched a fresh seed, so the pulse may move it at once
       isSeed: true,
+      communityId,
     });
 
     const order = shuffledVolunteerIndices();
@@ -645,6 +668,7 @@ async function writeDataset(ctx: MutationCtx): Promise<SeedStats> {
       message: row.message,
       isSim: true,
       createdAt: now - offsets[i],
+      communityId,
     });
   }
 

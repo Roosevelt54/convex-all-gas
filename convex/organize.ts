@@ -7,11 +7,13 @@ import {
   WINDOW_BACK_MS,
   WINDOW_FWD_MS,
   cancelOpenJob,
+  demoCommunity,
   hashString,
   logActivity,
   openScheduledShift,
   scheduleOpen,
   touchShift,
+  usernameOf,
 } from "./lib";
 
 const MAX_PROJECTS_PER_ORGANIZER = 10;
@@ -117,6 +119,8 @@ export const openShift = internalMutation({
 
 export const createProject = mutation({
   args: {
+    // Omitted = the public demo community (the board everyone sees).
+    communityId: v.optional(v.id("communities")),
     title: v.string(),
     summary: v.string(),
     orgName: v.string(),
@@ -126,6 +130,18 @@ export const createProject = mutation({
   returns: v.id("projects"),
   handler: async (ctx, args) => {
     const userId = await requireAccount(ctx);
+    // A project lives inside ONE community's space, and only that community's organizer adds to it.
+    const community =
+      args.communityId === undefined ? await demoCommunity(ctx) : await ctx.db.get(args.communityId);
+    if (!community) {
+      throw new ConvexError({ code: "GONE", message: "That community no longer exists." });
+    }
+    if (!community.isPublic && community.organizerId !== userId) {
+      throw new ConvexError({
+        code: "NOT_YOURS",
+        message: "Only this community's organizer can add projects to it.",
+      });
+    }
 
     const title = text(args.title, "Project title", 3, 60);
     const summary = text(args.summary, "Summary", 0, 280);
@@ -166,6 +182,7 @@ export const createProject = mutation({
       createdAt: now,
       organizerId: userId,
       organizerName: await organizerDisplayName(ctx, userId),
+      communityId: community._id,
     });
   },
 });
@@ -271,6 +288,7 @@ export const createShift = mutation({
       lastChangeIsSim: false,
       lastHumanTouchAt: now,
       isSeed: false,
+      ...(project.communityId === undefined ? {} : { communityId: project.communityId }),
     });
 
     if (opensAt !== undefined) {
@@ -332,8 +350,20 @@ export const openNow = mutation({
 
 /* ------------------------------------------------------------------- query -- */
 
-const personRow = v.object({ position: v.number(), handle: v.string(), verified: v.boolean() });
-const waitRow = v.object({ rank: v.number(), handle: v.string(), verified: v.boolean() });
+// `username` is set only for verified accounts: two accounts may both be called "Mike", but only
+// one is @mike_k, which is what lets an organizer tell them apart.
+const personRow = v.object({
+  position: v.number(),
+  handle: v.string(),
+  verified: v.boolean(),
+  username: v.union(v.string(), v.null()),
+});
+const waitRow = v.object({
+  rank: v.number(),
+  handle: v.string(),
+  verified: v.boolean(),
+  username: v.union(v.string(), v.null()),
+});
 
 const organizedShift = v.object({
   _id: v.id("shifts"),
@@ -366,6 +396,8 @@ export const myProjects = query({
       locationLabel: v.string(),
       accentIndex: v.number(),
       tags: v.array(v.string()),
+      communityId: v.union(v.id("communities"), v.null()),
+      communityName: v.union(v.string(), v.null()),
       shifts: v.array(organizedShift),
     }),
   ),
@@ -382,7 +414,11 @@ export const myProjects = query({
     const person = async (id: Id<"volunteers">) => {
       if (!people.has(id)) people.set(id, await ctx.db.get(id));
       const p = people.get(id) ?? null;
-      return { handle: p?.handle ?? "A neighbour", verified: p !== null && p.userId !== undefined };
+      return {
+        handle: p?.handle ?? "A neighbour",
+        verified: p !== null && p.userId !== undefined,
+        username: await usernameOf(ctx, p),
+      };
     };
 
     const out = [];
@@ -440,6 +476,11 @@ export const myProjects = query({
         locationLabel: project.locationLabel,
         accentIndex: project.accentIndex,
         tags: project.tags,
+        communityId: project.communityId ?? null,
+        communityName:
+          project.communityId === undefined
+            ? null
+            : ((await ctx.db.get(project.communityId))?.name ?? null),
         shifts: rows,
       });
     }
