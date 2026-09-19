@@ -1,9 +1,10 @@
 .lp {
-  --lp-bg: #0b0b0c;
-  --lp-fg: #f4f4f2;
-  --lp-muted: #a3a3a0;
-  --lp-line: rgba(255, 255, 255, 0.1);
-  --lp-card: #141416;
+  /* The same tokens the app uses, so the two halves of the product match exactly. */
+  --lp-bg: var(--bg);
+  --lp-fg: var(--text);
+  --lp-muted: var(--muted);
+  --lp-line: var(--line);
+  --lp-card: var(--surface);
   background: var(--lp-bg);
   color: var(--lp-fg);
   min-height: 100vh;
@@ -27,7 +28,28 @@
 .lp__btn--ghost { background: transparent; }
 .lp__btn--ghost:hover { background: rgba(255, 255, 255, 0.06); }
 .lp__btn--sm { padding: 7px 14px; font-size: 0.85rem; }
-.lp__hero { max-width: 900px; margin: 0 auto; padding: 96px 16px 72px; text-align: center; }
+.lp__hero {
+  position: relative;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 96px 16px 72px;
+  text-align: center;
+}
+/* The rotating 3D field. Sits behind the words, never over them. */
+.lp__backdrop {
+  position: absolute;
+  top: -90px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 150vw;
+  max-width: none;
+  height: calc(100% + 130px);
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.62;
+  mask-image: radial-gradient(closest-side, #000 55%, transparent 100%);
+}
+.lp__hero > *:not(.lp__backdrop) { position: relative; z-index: 1; }
 .lp__hero h1 {
   font-family: Georgia, "Times New Roman", serif; font-weight: 400;
   font-size: clamp(2.2rem, 6vw, 4.2rem); line-height: 1.08; letter-spacing: -0.02em; margin: 0;

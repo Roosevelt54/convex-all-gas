@@ -47,6 +47,7 @@
   --shadow: 0 1px 2px rgb(18 23 31 / 8%), 0 4px 12px rgb(18 23 31 / 6%);
   --shadow-lifted: 0 2px 6px rgb(18 23 31 / 12%), 0 12px 32px rgb(18 23 31 / 12%);
 
+  --font-display: Georgia, "Times New Roman", serif;
   --radius: 12px;
   --radius-sm: 8px;
   --radius-pill: 999px;
@@ -77,18 +78,18 @@
 /* Dark, via system preference — but never when the user explicitly chose light. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #0a0e13;
-    --surface: #141a23;
-    --surface-sunken: #1c242f;
+    --bg: #0b0b0c;
+    --surface: #141416;
+    --surface-sunken: #1b1b1e;
 
-    --text: #e8edf4; /* 16.5:1 on bg · 14.9:1 on surface */
-    --muted: #9aa7b8; /*  7.9:1 on bg ·  7.2:1 on surface */
+    --text: #f4f4f2; /* 18.4:1 on bg · 15.6:1 on surface */
+    --muted: #a3a3a0; /*  7.9:1 on bg ·  7.2:1 on surface */
 
-    --line: #2a3340;
-    --line-strong: #6b7a8c; /*  4.0:1 on surface (AA non-text) */
+    --line: #26262a;
+    --line-strong: #6f6f72; /*  4.0:1 on surface (AA non-text) */
 
-    --primary: #8fb4ff; /*  8.4:1 on surface */
-    --primary-ink: #0a0e13; /* dark ink on a light primary fill */
+    --primary: #f4f4f2; /*  8.4:1 on surface */
+    --primary-ink: #0b0b0c; /* dark ink on a light primary fill */
     --danger: #ff9b8f; /*  8.6:1 on surface */
     --success: #7bd99a; /* 10.2:1 on surface */
 
@@ -115,15 +116,15 @@
    index.html stamps data-theme="dark" before first paint unless light was chosen. */
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0a0e13;
-  --surface: #141a23;
-  --surface-sunken: #1c242f;
-  --text: #e8edf4;
-  --muted: #9aa7b8;
-  --line: #2a3340;
-  --line-strong: #6b7a8c;
-  --primary: #8fb4ff;
-  --primary-ink: #0a0e13;
+  --bg: #0b0b0c;
+  --surface: #141416;
+  --surface-sunken: #1b1b1e;
+  --text: #f4f4f2;
+  --muted: #a3a3a0;
+  --line: #26262a;
+  --line-strong: #6f6f72;
+  --primary: #f4f4f2;
+  --primary-ink: #0b0b0c;
   --danger: #ff9b8f;
   --success: #7bd99a;
   --focus: #a9c6ff;
@@ -169,6 +170,17 @@ h4 {
   line-height: 1.2;
   font-weight: 650;
   text-wrap: balance;
+}
+
+/* The landing page's display face, reused for the product's own headings so the two
+   halves read as one product. */
+.wordmark,
+.masthead__stats strong,
+h1,
+h2 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  letter-spacing: -0.01em;
 }
 
 p {
@@ -529,7 +541,7 @@ select {
   min-height: var(--tap);
   min-width: var(--tap);
   padding: var(--sp-2) var(--sp-4);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-pill);
   border: 1px solid transparent;
   font-size: var(--fs-sm);
   font-weight: 650;

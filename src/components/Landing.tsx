@@ -1,3 +1,4 @@
+import LandingBackdrop from "./LandingBackdrop";
 import "./Landing.css";
 
 const REPO = "https://github.com/Roosevelt54/convex-all-gas";
@@ -20,6 +21,7 @@ export default function Landing() {
       </nav>
 
       <header className="lp__hero" id="top">
+        <LandingBackdrop />
         <h1>The shift everyone meant to sign up for is the one nobody did.</h1>
         <p className="lp__lede">
           Crewcall gives each neighbourhood its own live board of volunteer shifts. Organizers post,
