@@ -46,3 +46,10 @@ counters with no input, and a claim in one window moved the wall display's spots
 second window without a reload. The race test passes against the cloud backend: 8 concurrent
 claims at the last spot, 1 winner, 7 waitlisted. Bumped the seed version so the deployment
 reseeds cleanly without test leftovers (`convex/seed.ts`).
+
+### 2026-09-19 - ccd990d
+- Organizer tools: username/password accounts (Convex Auth), organizer screen to create projects and shifts, first-open name step, timed shift unlock with "Notify me" alerts.
+- Private communities: an organizer creates a community and shares its invite link (`#/join/<code>`). Only the organizer and members who opened the link can see its shifts, activity feed and "here now" presence, or claim its shifts; access is checked on the server. The seeded demo community stays public.
+- Community switcher in the header; new projects post into the community being viewed.
+- Guest activity (memberships, claims, "Notify me" taps) moves into the account on sign-in; renaming updates "Posted by" names.
+- 14 backend tests (convex-test + vitest), including community isolation. Live: https://quaint-ermine-433.convex.site
