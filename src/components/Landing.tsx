@@ -22,10 +22,11 @@ export default function Landing() {
 
       <header className="lp__hero" id="top">
         <LandingBackdrop />
-        <h1>The shift everyone meant to sign up for is the one nobody did.</h1>
+        <h1>A group chat is not a rota, and “I think someone’s got it” is not a plan.</h1>
         <p className="lp__lede">
-          Crewcall gives each neighbourhood its own live board of volunteer shifts. Organizers post,
-          members claim a spot in one tap, and every screen updates the instant anyone moves.
+          You posted it in the group chat, two people said “maybe”, and you spent Friday night
+          counting heads. Crewcall gives your community its own live board — share a link, watch
+          spots fill in a tap, and trust that the last one went to exactly one person.
         </p>
         <div className="lp__cta">
           <a className="lp__btn lp__btn--light" href="#/">Open the live board</a>
